@@ -385,19 +385,29 @@ with tab3:
         )
         colx, coly = st.columns(2)
         with colx:
+            # Gerar Excel com os registros filtrados
+            excel_filtrado_buf = make_excel_workbook(df_registros_filtrados, {})
+
+            # Botão de download
             st.download_button(
-                label="📥 Exportar registros",
+                label="📥 Exportar filtrado",
+                data=excel_filtrado_buf,
+                file_name="registros_filtrados.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_registros_filtrados"
+            )
+
+
+            # Gerar Excel com todos os registros
+            excel_buf = make_excel_workbook(df_registros, {})
+
+            # Botão de download
+            st.download_button(
+                label="📥 Exportar todos",
                 data=excel_buf,
                 file_name="registros.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_registros"
             )
 
-            st.download_button(
-                label="📥 Exportar filtrado",
-                data=excel_filtrado_buf,  # variável certa para esse caso
-                file_name="registros_filtrados.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_registros_filtrados"
-            )
 
