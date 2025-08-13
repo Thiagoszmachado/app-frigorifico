@@ -1,7 +1,6 @@
 # app.py
 from __future__ import annotations
 
-import os
 from datetime import date, datetime
 from io import BytesIO
 
@@ -9,7 +8,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from PIL import Image
 from supabase import Client, create_client
 
 # ------------------- PAGE CONFIG -------------------
@@ -20,7 +18,7 @@ st.set_page_config(
 )
 
 # ------------------- LOGO --------------------------
-# Sidebar (ótima no mobile)
+# Sidebar (ótimo no mobile)
 try:
     st.sidebar.image("frigard corel.png", use_column_width=True)
 except Exception:
@@ -36,7 +34,7 @@ except Exception:
 
 st.write("")
 
-# ------------------- IMPORTS OPCIONAIS -------------
+# ------------------- IMPORT OPCIONAL ---------------
 try:
     import xlsxwriter  # noqa
     HAS_XLSXWRITER = True
@@ -50,6 +48,7 @@ MESES = [
     "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
     "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"
 ]
+MAPA_MES = {i+1: nome for i, nome in enumerate(MESES)}
 
 # ------------------- SUPABASE CLIENT ---------------
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -70,12 +69,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def make_excel_workbook(df_registros: pd.DataFrame,
                         sheets: dict[str, pd.DataFrame] | None = None) -> BytesIO:
-    """
-    Gera um Excel com:
-      - aba 'Registros' (df_registros)
-      - abas extras com pivôs (dict name->DataFrame)
-    Requer xlsxwriter para funcionar (opcional).
-    """
+    """Gera Excel com aba Registros + abas extras (pivôs)."""
     output = BytesIO()
     if not HAS_XLSXWRITER:
         output.write(b"")
@@ -84,11 +78,9 @@ def make_excel_workbook(df_registros: pd.DataFrame,
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         safe = df_registros.copy()
-
         for c in ["data_entrada_confinamento", "data_abate", "created_at"]:
             if c in safe.columns:
                 safe[c] = pd.to_datetime(safe[c], errors="coerce").dt.strftime("%d/%m/%Y")
-
         safe.to_excel(writer, sheet_name="Registros", index=False)
 
         if sheets:
@@ -120,17 +112,15 @@ def add_loja_if_new(nome_loja: str):
 def month_pivot(df: pd.DataFrame, metric: str, agg: str = "mean") -> pd.DataFrame:
     if df.empty or metric not in df.columns:
         return pd.DataFrame()
-    pt = df.pivot_table(index="origem", columns="mes_nome", values=metric,
-                        aggfunc=("sum" if agg == "sum" else "mean"))
+    pt = df.pivot_table(index="origem", columns="mes_nome",
+                        values=metric, aggfunc=("sum" if agg == "sum" else "mean"))
     cols = [m for m in MESES if m in pt.columns]
     idx = [o for o in ORIGENS if o in pt.index]
-    pt = pt.reindex(index=idx, columns=cols)
-    return pt
+    return pt.reindex(index=idx, columns=cols)
 
 
 # ------------------- LOGGER DE USO -----------------
 def log_usage(action: str, rows: int = 0, notes: dict | None = None):
-    """Registra um evento de uso (realtime). Tabela: public.usage_events"""
     try:
         supabase.table("usage_events").insert({
             "action": action,
@@ -141,13 +131,13 @@ def log_usage(action: str, rows: int = 0, notes: dict | None = None):
         pass
 
 
-# ------------------- CAMADA DE DADOS ---------------
+# ------------------- DADOS (com meses sem locale) --
 @st.cache_data(ttl=20)
 def fetch_abates() -> pd.DataFrame:
     res = supabase.table("abates").select("*").order("data_abate").execute()
     df = pd.DataFrame(res.data or [])
 
-    # Normaliza datas
+    # Datas -> date
     for c in ["data_entrada_confinamento", "data_abate", "created_at"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
@@ -158,42 +148,38 @@ def fetch_abates() -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
     # Métricas derivadas
+    dt_ent = pd.to_datetime(df.get("data_entrada_confinamento"), errors="coerce")
+    dt_aba = pd.to_datetime(df.get("data_abate"), errors="coerce")
+
     df["dias_confinado"] = np.where(
-        (pd.to_datetime(df.get("data_entrada_confinamento"))\
-             .notna()) & (pd.to_datetime(df.get("data_abate")).notna()),
-        (pd.to_datetime(df["data_abate"]) - pd.to_datetime(df["data_entrada_confinamento"])).dt.days,
-        np.nan,
+        (dt_ent.notna()) & (dt_aba.notna()),
+        (dt_aba - dt_ent).dt.days,
+        np.nan
     )
     df["ganho_peso_kg"] = np.where(
         (df.get("peso_abate_kg").notna()) & (df.get("peso_entrada_kg").notna()),
         df["peso_abate_kg"] - df["peso_entrada_kg"],
-        np.nan,
+        np.nan
     )
     df["gmd_kg_dia"] = np.where(
         (df["ganho_peso_kg"].notna()) & (df["dias_confinado"] > 0),
         df["ganho_peso_kg"] / df["dias_confinado"],
-        np.nan,
+        np.nan
     )
     df["peso_carcaca_kg"] = np.where(
         (df.get("peso_abate_kg").notna()) & (df.get("rendimento_carcaca_pct").notna()),
         df["peso_abate_kg"] * df["rendimento_carcaca_pct"],
-        np.nan,
+        np.nan
     )
     df["@_arrobas"] = df["peso_carcaca_kg"] / 15.0
 
-    # === Tempo (sem locale) ===
-    dt_abate = pd.to_datetime(df["data_abate"], errors="coerce")
-    df["ano"] = dt_abate.dt.year
-    df["mes"] = dt_abate.dt.month
-
-    mapa_mes = {
-        1: "JANEIRO", 2: "FEVEREIRO", 3: "MARÇO", 4: "ABRIL",
-        5: "MAIO", 6: "JUNHO", 7: "JULHO", 8: "AGOSTO",
-        9: "SETEMBRO", 10: "OUTUBRO", 11: "NOVEMBRO", 12: "DEZEMBRO",
-    }
-    df["mes_nome"] = df["mes"].map(mapa_mes)
+    # Tempo (sem locale)
+    df["ano"] = dt_aba.dt.year
+    df["mes"] = dt_aba.dt.month
+    df["mes_nome"] = df["mes"].map(MAPA_MES)
 
     return df
+
 
 @st.cache_data(ttl=60)
 def fetch_lojas() -> list[str]:
@@ -239,13 +225,12 @@ meses_sel = st.sidebar.multiselect("Meses", MESES, default=MESES)
 st.sidebar.divider()
 st.sidebar.subheader("📈 Uso do plano (estimativa)")
 
-# Loga primeira abertura da sessão
 if "logged_open" not in st.session_state:
     log_usage("open_app")
     st.session_state["logged_open"] = True
 
 total_linhas = len(df_all_cache)
-mb_est = (total_linhas * 0.5) / 1024  # ~0,5KB por linha
+mb_est = (total_linhas * 0.5) / 1024  # ~0,5KB/linha
 st.sidebar.write(f"Registros: **{total_linhas}**")
 st.sidebar.write(f"Espaço estimado: **{mb_est:.2f} MB** / 500 MB")
 st.sidebar.progress(min(1.0, mb_est / 500.0), text="Limite de 500 MB")
@@ -277,7 +262,6 @@ with tab1:
 
         colD, colE, colF = st.columns(3)
         with colD:
-            # lojas (pode digitar nova)
             lojas = fetch_lojas()
             lojas_opt = lojas + ["+ Cadastrar nova loja…"]
             destino_sel = st.selectbox("Destino (loja) *", lojas_opt, index=0)
@@ -378,6 +362,7 @@ with tab2:
     df = df_all.loc[mask_global].copy()
     df_registros_filtrados = df.copy()
 
+    # ---- KPIs (cards)
     colm1, colm2, colm3, colm4 = st.columns(4)
     with colm1:
         st.metric("Animais", len(df))
@@ -389,32 +374,61 @@ with tab2:
         st.metric("Rendimento médio (%)", f"{(df['rendimento_carcaca_pct']*100).mean():.2f}" if not df.empty else "–")
 
     st.divider()
+
+    # ---- GRÁFICOS (6 painéis: 3 linhas x 2 colunas)
+    # 1) Total de carcaça por mês
+    g1 = df.groupby("mes_nome", as_index=False)["peso_carcaca_kg"].sum().pipe(ordenar_por_mes)
+    # 2) Total de carcaça por origem
+    g2 = df.groupby("origem", as_index=False)["peso_carcaca_kg"].sum().sort_values("peso_carcaca_kg", ascending=False)
+    # 3) Rendimento médio por mês
+    g3 = df.groupby("mes_nome", as_index=False)["rendimento_carcaca_pct"].mean().pipe(ordenar_por_mes)
+    g3["rendimento_%"] = g3["rendimento_carcaca_pct"] * 100
+    # 4) GMD médio por mês
+    g4 = df.groupby("mes_nome", as_index=False)["gmd_kg_dia"].mean().pipe(ordenar_por_mes)
+    # 5) Ganho médio de peso por mês
+    g5 = df.groupby("mes_nome", as_index=False)["ganho_peso_kg"].mean().pipe(ordenar_por_mes)
+    # 6) Animais por origem
+    g6 = df.groupby("origem", as_index=False)["codigo"].count().rename(columns={"codigo": "qtd"}).sort_values("qtd", ascending=False)
+
     c1, c2 = st.columns(2)
     with c1:
-        fig = px.bar(
-            df.groupby("mes_nome", as_index=False)["peso_carcaca_kg"].sum()
-              .pipe(ordenar_por_mes),
-            x="mes_nome", y="peso_carcaca_kg", title="Total de carcaça por mês (kg)"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(px.bar(g1, x="mes_nome", y="peso_carcaca_kg",
+                               title="Total de carcaça por mês (kg)"),
+                        use_container_width=True)
     with c2:
-        fig2 = px.bar(
-            df.groupby("origem", as_index=False)["peso_carcaca_kg"].sum()
-              .sort_values("peso_carcaca_kg", ascending=False),
-            x="origem", y="peso_carcaca_kg", title="Total de carcaça por origem (kg)"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(px.bar(g2, x="origem", y="peso_carcaca_kg",
+                               title="Total de carcaça por origem (kg)"),
+                        use_container_width=True)
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.plotly_chart(px.line(g3, x="mes_nome", y="rendimento_%",
+                                markers=True, title="Rendimento médio por mês (%)"),
+                        use_container_width=True)
+    with c4:
+        st.plotly_chart(px.line(g4, x="mes_nome", y="gmd_kg_dia",
+                                markers=True, title="GMD médio por mês (kg/dia)"),
+                        use_container_width=True)
+
+    c5, c6 = st.columns(2)
+    with c5:
+        st.plotly_chart(px.bar(g5, x="mes_nome", y="ganho_peso_kg",
+                               title="Ganho médio de peso por mês (kg)"),
+                        use_container_width=True)
+    with c6:
+        st.plotly_chart(px.pie(g6, names="origem", values="qtd",
+                               title="Distribuição de animais por origem"),
+                        use_container_width=True)
 
     st.divider()
-    cold1, cold2 = st.columns(2)
-    with cold1:
-        csv_bytes = df_to_csv_bytes(df_registros_filtrados)
-        st.download_button(
-            "⬇ Baixar CSV (filtrado)", data=csv_bytes,
-            file_name=f"abates_{ano_sel}_filtrado.csv", mime="text/csv",
-            key="dl_csv_tab2"
-        )
-        log_usage("export_csv", rows=len(df_registros_filtrados))
+    # Exportação do que está filtrado
+    csv_bytes = df_to_csv_bytes(df_registros_filtrados)
+    st.download_button(
+        "⬇ Baixar CSV (filtrado)", data=csv_bytes,
+        file_name=f"abates_{ano_sel}_filtrado.csv", mime="text/csv",
+        key="dl_csv_tab2"
+    )
+    log_usage("export_csv", rows=len(df_registros_filtrados))
 
 # ================ TAB 3: TABELAS ===================
 with tab3:
@@ -443,9 +457,8 @@ with tab3:
         st.dataframe(pt_carc, use_container_width=True)
 
     st.divider()
-    colx, coly = st.columns(2)
+    colx, _ = st.columns(2)
     with colx:
-        # Excel com registros + pivôs
         excel_buf = make_excel_workbook(
             df,
             sheets={
