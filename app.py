@@ -24,6 +24,7 @@ st.set_page_config(
     page_icon="🥩",
     layout="wide",
 )
+st.sidebar.image("frigard_corel.png", use_column_width=True)
 
 # ------------------------------- LOGO ------------------------------------
 try:
