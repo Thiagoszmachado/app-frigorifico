@@ -1,0 +1,22 @@
+# Arquivos temporários do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configs locais
+.env
+*.sqlite3
+
+# Cache do Streamlit
+.streamlit/
+
+# Configurações do VSCode
+.vscode/
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# Pasta de ambiente virtual
+venv/
+.env/
