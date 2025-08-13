@@ -1,0 +1,2 @@
+codigo,sexo,origem,destino,data_entrada_confinamento,data_abate,peso_entrada_kg,peso_abate_kg,rendimento_carcaca_pct
+teste,M,CONFINAMENTO,Santa Margarida 2,2025-08-01,2025-08-13,500.0,1000.0,0.73
