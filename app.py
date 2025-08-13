@@ -20,7 +20,7 @@ except Exception:
 
 # ------------------------ PAGE CONFIG (primeiro!) ------------------------
 st.set_page_config(
-    page_title="Controle de Abate de Boi",
+    page_title="FriGard",
     page_icon="🐂",
     layout="wide",
 )
