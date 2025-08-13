@@ -1,5 +1,5 @@
 # ============================ APP FRIGORÍFICO ============================
-# Streamlit + Supabase: Login, CRUD, Dashboards, Exportação e Monitor de Uso
+# Streamlit + Supabase (sem login) — CRUD, Dashboards e Exportações
 
 # ----------------------------- IMPORTS -----------------------------------
 import streamlit as st
@@ -34,47 +34,10 @@ SEXO_OPTS = ["M", "F"]
 MESES = ["JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
          "JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO"]
 
+# --------------------------- SUPABASE CLIENT -----------------------------
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY"))
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ----------------------------- AUTH (login) -------------------------------
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-with st.sidebar:
-    st.subheader("🔐 Acesso")
-    if not st.session_state.user:
-        with st.form("login_form", clear_on_submit=False):
-            email = st.text_input("E-mail", placeholder="voce@empresa.com")
-            pwd = st.text_input("Senha", type="password")
-            colA, colB = st.columns(2)
-            login = colA.form_submit_button("Entrar")
-            signup = colB.form_submit_button("Criar conta")
-
-        if login and email and pwd:
-            try:
-                res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
-                st.session_state.user = res.user
-                st.rerun()
-            except Exception as e:
-                st.error("Falha ao entrar. Confira e-mail/senha.")
-        if signup and email and pwd:
-            try:
-                res = supabase.auth.sign_up({"email": email, "password": pwd})
-                st.info("Conta criada! Verifique seu e-mail se a confirmação estiver ativa e então faça login.")
-            except Exception:
-                st.error("Falha ao criar conta. Tente outro e-mail.")
-        st.stop()
-    else:
-        st.success(f"Bem-vindo, {st.session_state.user.email}")
-        if st.button("Sair"):
-            supabase.auth.sign_out()
-            st.session_state.user = None
-            st.rerun()
-
-# UID do usuário logado
-USER_ID = st.session_state.user.id if st.session_state.user else None
 
 # ------------------------------- HELPERS ---------------------------------
 def ordenar_por_mes(df: pd.DataFrame, col="mes_nome") -> pd.DataFrame:
@@ -97,7 +60,6 @@ def make_excel_workbook(df_registros: pd.DataFrame, sheets: dict[str, pd.DataFra
         for name, dfp in sheets.items():
             if isinstance(dfp, pd.DataFrame) and not dfp.empty:
                 dfp.to_excel(writer, sheet_name=name[:31], index=True)
-        # auto width (básico)
         ws0 = writer.sheets["Registros"]
         for i, col in enumerate(safe.columns):
             width = max(10, min(35, int(safe[col].astype(str).str.len().fillna(0).quantile(0.9))+2))
@@ -105,32 +67,28 @@ def make_excel_workbook(df_registros: pd.DataFrame, sheets: dict[str, pd.DataFra
     output.seek(0)
     return output
 
-def log_event(event: str, meta: dict | None = None):
-    """Registra 1 evento de uso para contagem de requisições (aproximação)."""
-    if not USER_ID:
+# CRUD lojas
+def add_loja_if_new(nome_loja: str):
+    nome_loja = (nome_loja or "").strip()
+    if not nome_loja:
         return
     try:
-        supabase.table("usage_events").insert({
-            "user_id": USER_ID,
-            "event": event,
-            "meta": meta or {}
-        }).execute()
+        existing = supabase.table("lojas").select("id").eq("nome", nome_loja).execute()
+        if not existing.data:
+            supabase.table("lojas").insert({"nome": nome_loja}).execute()
     except Exception:
         pass
 
 # --------------------------- DATA ACCESS LAYER ----------------------------
 @st.cache_data(ttl=20, show_spinner=False)
-def fetch_abates(user_id: str) -> pd.DataFrame:
-    # somente do usuário (RLS garante também do lado do BD)
-    res = supabase.table("abates").select("*").eq("user_id", user_id).execute()
-    log_event("fetch_abates", {"rows": len(res.data or [])})
+def fetch_abates() -> pd.DataFrame:
+    res = supabase.table("abates").select("*").order("data_abate").execute()
     df = pd.DataFrame(res.data or [])
     if df.empty:
-        # retorna colunas esperadas
         cols = ["id","codigo","sexo","origem","destino","data_entrada_confinamento","data_abate",
                 "peso_entrada_kg","peso_abate_kg","rendimento_carcaca_pct","created_at",
                 "dias_confinado","ganho_peso_kg","gmd_kg_dia","peso_carcaca_kg","@_arrobas",
-                "ano","mes","mes_nome","user_id"]
+                "ano","mes","mes_nome"]
         return pd.DataFrame(columns=cols)
 
     for c in ["data_entrada_confinamento","data_abate","created_at"]:
@@ -166,28 +124,22 @@ def fetch_abates(user_id: str) -> pd.DataFrame:
 def fetch_lojas() -> list[str]:
     try:
         res = supabase.table("lojas").select("nome").order("nome").execute()
-        log_event("fetch_lojas", {"rows": len(res.data or [])})
         return sorted([r["nome"] for r in (res.data or [])])
     except Exception:
         return []
 
 def upsert_abate(payload: dict):
-    # injeta user_id
-    payload["user_id"] = USER_ID
     sel = supabase.table("abates").select("id") \
-        .eq("codigo", payload["codigo"]).eq("data_abate", payload["data_abate"]).eq("user_id", USER_ID).execute()
+        .eq("codigo", payload["codigo"]).eq("data_abate", payload["data_abate"]).execute()
     if sel.data:
         supabase.table("abates").update(payload).eq("id", sel.data[0]["id"]).execute()
-        log_event("update_abate", {"codigo": payload["codigo"]})
     else:
         supabase.table("abates").insert(payload).execute()
-        log_event("insert_abate", {"codigo": payload["codigo"]})
     fetch_abates.clear()
 
 def delete_abate(codigo: str, data_abate: date):
     supabase.table("abates").delete() \
-        .eq("codigo", codigo).eq("data_abate", str(data_abate)).eq("user_id", USER_ID).execute()
-    log_event("delete_abate", {"codigo": codigo})
+        .eq("codigo", codigo).eq("data_abate", str(data_abate)).execute()
     fetch_abates.clear()
 
 def month_pivot(df, metric, agg="mean"):
@@ -201,7 +153,7 @@ def month_pivot(df, metric, agg="mean"):
 
 # ------------------------------- SIDEBAR ---------------------------------
 st.sidebar.title("Filtro")
-df_all_cache = fetch_abates(USER_ID)
+df_all_cache = fetch_abates()
 
 anos_series = df_all_cache["ano"] if "ano" in df_all_cache.columns else pd.Series(dtype="float")
 anos = sorted({int(x) for x in anos_series.dropna().unique()}) or [datetime.now().year]
@@ -216,30 +168,6 @@ lojas_existentes = (
 dest_sel = st.sidebar.multiselect("Destino (loja)", lojas_existentes, default=lojas_existentes)
 
 meses_sel = st.sidebar.multiselect("Meses", MESES, default=MESES)
-
-st.sidebar.divider()
-# --------------------------- MONITOR DE USO ------------------------------
-st.sidebar.subheader("📈 Uso do plano (estimativa)")
-# Tamanho aproximado (0.5 KB por linha)
-total_linhas = len(df_all_cache)
-kb_est = total_linhas * 0.5
-mb_est = kb_est / 1024
-st.sidebar.write(f"Registros: **{total_linhas}**")
-st.sidebar.write(f"Espaço estimado: **{mb_est:.2f} MB** / 500 MB")
-
-# Requisições (contadas pelas inserções na tabela usage_events)
-# janela: mês atual
-inicio_mes = datetime(datetime.now().year, datetime.now().month, 1)
-try:
-    usage = supabase.table("usage_events").select("id") \
-        .eq("user_id", USER_ID) \
-        .gte("created_at", inicio_mes.isoformat()) \
-        .execute()
-    reqs_mes = len(usage.data or [])
-except Exception:
-    reqs_mes = 0
-st.sidebar.write(f"Requisições (mês): **{reqs_mes}** / 50.000")
-st.sidebar.progress(min(1.0, reqs_mes/50000.0))
 
 # --------------------------------- TABS ----------------------------------
 tab1, tab2, tab3 = st.tabs([
@@ -261,7 +189,7 @@ with tab1:
         def _lojas_options():
             lojas = fetch_lojas()
             if not lojas:
-                lojas = sorted(fetch_abates(USER_ID)["destino"].dropna().unique().tolist())
+                lojas = sorted(fetch_abates()["destino"].dropna().unique().tolist())
             return lojas + ["+ Cadastrar nova loja..."]
 
         loja_opt = _lojas_options()
@@ -304,7 +232,7 @@ with tab1:
     st.divider()
     st.subheader("Registros (filtro rápido)")
 
-    df_view = fetch_abates(USER_ID)
+    df_view = fetch_abates()
     if df_view.empty:
         st.info("Sem registros ainda.")
     else:
@@ -343,7 +271,7 @@ with tab1:
                     st.error("Informe o código e a data do abate.")
 
 # ------------ APLICA FILTROS GLOBAIS (para tabs 2 e 3) -------------------
-df_all = fetch_abates(USER_ID)
+df_all = fetch_abates()
 mask_global = (
     (df_all["ano"] == ano_sel) &
     (df_all["origem"].isin(origem_sel)) &
