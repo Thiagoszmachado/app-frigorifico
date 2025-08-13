@@ -11,6 +11,13 @@ from PIL import Image
 import plotly.express as px
 from io import BytesIO
 
+# tentar detectar xlsxwriter para não quebrar exportação
+try:
+    import xlsxwriter  # noqa: F401
+    HAS_XLSXWRITER = True
+except Exception:
+    HAS_XLSXWRITER = False
+
 # ------------------------ PAGE CONFIG (primeiro!) ------------------------
 st.set_page_config(
     page_title="Controle de Abate de Boi",
@@ -50,20 +57,31 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 def make_excel_workbook(df_registros: pd.DataFrame, sheets: dict[str, pd.DataFrame]) -> BytesIO:
+    """Cria um Excel em memória com a aba 'Registros' + abas extras em 'sheets'."""
     output = BytesIO()
+    # se não tiver xlsxwriter instalado, devolve arquivo vazio para evitar crash
+    if not HAS_XLSXWRITER:
+        output.write(b"")
+        output.seek(0)
+        return output
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         safe = df_registros.copy()
         for c in ["data_entrada_confinamento","data_abate","created_at"]:
             if c in safe.columns:
                 safe[c] = pd.to_datetime(safe[c], errors="coerce").dt.strftime("%d/%m/%Y")
         safe.to_excel(writer, sheet_name="Registros", index=False)
+
         for name, dfp in sheets.items():
             if isinstance(dfp, pd.DataFrame) and not dfp.empty:
                 dfp.to_excel(writer, sheet_name=name[:31], index=True)
+
+        # auto width simples
         ws0 = writer.sheets["Registros"]
         for i, col in enumerate(safe.columns):
             width = max(10, min(35, int(safe[col].astype(str).str.len().fillna(0).quantile(0.9))+2))
             ws0.set_column(i, i, width)
+
     output.seek(0)
     return output
 
@@ -280,6 +298,9 @@ mask_global = (
 )
 df = df_all.loc[mask_global].copy()
 
+# o DataFrame filtrado que será usado para exportação:
+df_registros_filtrados = df.copy()
+
 # ========================= TAB 2: DASHBOARD ==============================
 with tab2:
     st.subheader("Dashboard Geral")
@@ -342,23 +363,28 @@ with tab2:
 
         st.divider()
         st.subheader("Exportar")
-        st.download_button("⬇️ Baixar CSV (registros filtrados)",
-                           data=df_to_csv_bytes(df),
-                           file_name=f"abates_{ano_sel}_filtros.csv",
-                           mime="text/csv", use_container_width=True)
+        # CSV dos registros filtrados (Tab 2)
+        st.download_button(
+            "⬇️ Baixar CSV (registros filtrados)",
+            data=df_to_csv_bytes(df_registros_filtrados),
+            file_name=f"abates_{ano_sel}_filtros.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="dl_csv_tab2"
+        )
 
 # ================= TAB 3: TABELAS & INDICADORES ==========================
 with tab3:
     st.subheader("Tabelas e Indicadores")
-    if df.empty:
+    if df_registros_filtrados.empty:
         st.info("Sem dados para os filtros selecionados.")
     else:
         st.markdown("**Médias por Origem e Mês**")
-        piv_rend = month_pivot(df, "rendimento_carcaca_pct", agg="mean")*100
-        piv_gmd  = month_pivot(df, "gmd_kg_dia", agg="mean")
-        piv_pcar = month_pivot(df, "peso_carcaca_kg", agg="mean")
-        piv_pabt = month_pivot(df, "peso_abate_kg", agg="mean")
-        piv_totc = month_pivot(df, "peso_carcaca_kg", agg="sum")
+        piv_rend = month_pivot(df_registros_filtrados, "rendimento_carcaca_pct", agg="mean")*100
+        piv_gmd  = month_pivot(df_registros_filtrados, "gmd_kg_dia", agg="mean")
+        piv_pcar = month_pivot(df_registros_filtrados, "peso_carcaca_kg", agg="mean")
+        piv_pabt = month_pivot(df_registros_filtrados, "peso_abate_kg", agg="mean")
+        piv_totc = month_pivot(df_registros_filtrados, "peso_carcaca_kg", agg="sum")
 
         with st.expander("Rendimento de Carcaça (%)"):
             st.dataframe(piv_rend.round(1), use_container_width=True)
@@ -373,8 +399,10 @@ with tab3:
 
         st.divider()
         st.subheader("Exportar")
+
+        # Excel com registros filtrados + abas de pivôs (Tab 3)
         excel_buf = make_excel_workbook(
-            df_registros=df,
+            df_registros=df_registros_filtrados,
             sheets={
                 "Rendimento_%": (piv_rend.round(1) if isinstance(piv_rend, pd.DataFrame) else pd.DataFrame()),
                 "GMD_kg_dia":   (piv_gmd.round(2)  if isinstance(piv_gmd,  pd.DataFrame) else pd.DataFrame()),
@@ -383,31 +411,27 @@ with tab3:
                 "Total_carc_S": (piv_totc.round(0) if isinstance(piv_totc,pd.DataFrame) else pd.DataFrame()),
             }
         )
+
         colx, coly = st.columns(2)
         with colx:
-            # Gerar Excel com os registros filtrados
-            excel_filtrado_buf = make_excel_workbook(df_registros_filtrados, {})
+            if HAS_XLSXWRITER:
+                st.download_button(
+                    "⬇️ Baixar Excel (registros + pivôs)",
+                    data=excel_buf.getvalue(),
+                    file_name=f"abates_{ano_sel}_resumo.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_xlsx_tab3"
+                )
+            else:
+                st.warning("Pacote 'xlsxwriter' não instalado no servidor. Instale para habilitar Excel.")
 
-            # Botão de download
+        with coly:
             st.download_button(
-                label="📥 Exportar filtrado",
-                data=excel_filtrado_buf,
-                file_name="registros_filtrados.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_registros_filtrados"
+                "⬇️ Baixar CSV (registros filtrados)",
+                data=df_to_csv_bytes(df_registros_filtrados),
+                file_name=f"abates_{ano_sel}_filtros.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_csv_tab3"
             )
-
-
-            # Gerar Excel com todos os registros
-            excel_buf = make_excel_workbook(df_registros, {})
-
-            # Botão de download
-            st.download_button(
-                label="📥 Exportar todos",
-                data=excel_buf,
-                file_name="registros.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_registros"
-            )
-
-
