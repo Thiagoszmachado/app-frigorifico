@@ -10,52 +10,62 @@ import plotly.express as px
 import streamlit as st
 from supabase import Client, create_client
 
-# ------------------- PAGE CONFIG -------------------
+# ---------------------------------------------------
+# CONFIGURAÇÃO DA PÁGINA
+# ---------------------------------------------------
 st.set_page_config(
     page_title="Controle de Abate de Boi",
     page_icon="🐂",
     layout="wide",
 )
 
-# ------------------- LOGO --------------------------
-# Sidebar (ótimo no mobile)
+# ---------------------------------------------------
+# LOGO (sidebar + topo)
+# ---------------------------------------------------
 try:
     st.sidebar.image("frigard corel.png", use_column_width=True)
 except Exception:
     pass
 
-# Topo central (responsivo)
 try:
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
         st.image("frigard corel.png", use_column_width=True)
 except Exception:
     pass
 
 st.write("")
 
-# ------------------- IMPORT OPCIONAL ---------------
+# ---------------------------------------------------
+# DEPENDÊNCIA OPCIONAL (xlsxwriter para Excel)
+# ---------------------------------------------------
 try:
     import xlsxwriter  # noqa
     HAS_XLSXWRITER = True
 except Exception:
     HAS_XLSXWRITER = False
 
-# ------------------- CONSTANTES --------------------
+# ---------------------------------------------------
+# CONSTANTES
+# ---------------------------------------------------
 ORIGENS = ["CONFINAMENTO", "PASTO", "ABATE DIRETO", "SEMI-CONFINAMENTO"]
 SEXO = ["M", "F"]
 MESES = [
     "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
-    "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"
+    "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
 ]
-MAPA_MES = {i+1: nome for i, nome in enumerate(MESES)}
+MAPA_MES = {i + 1: nome for i, nome in enumerate(MESES)}
 
-# ------------------- SUPABASE CLIENT ---------------
+# ---------------------------------------------------
+# SUPABASE
+# ---------------------------------------------------
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY"))
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ------------------- HELPERS -----------------------
+# ---------------------------------------------------
+# HELPERS
+# ---------------------------------------------------
 def ordenar_por_mes(df: pd.DataFrame, col: str = "mes_nome") -> pd.DataFrame:
     if col in df.columns:
         df[col] = pd.Categorical(df[col], categories=MESES, ordered=True)
@@ -119,8 +129,8 @@ def month_pivot(df: pd.DataFrame, metric: str, agg: str = "mean") -> pd.DataFram
     return pt.reindex(index=idx, columns=cols)
 
 
-# ------------------- LOGGER DE USO -----------------
 def log_usage(action: str, rows: int = 0, notes: dict | None = None):
+    """Logger opcional em public.usage_events (ignora erros se não existir)."""
     try:
         supabase.table("usage_events").insert({
             "action": action,
@@ -131,7 +141,9 @@ def log_usage(action: str, rows: int = 0, notes: dict | None = None):
         pass
 
 
-# ------------------- DADOS (com meses sem locale) --
+# ---------------------------------------------------
+# DADOS (fetch_abates com meses sem locale + novos cálculos)
+# ---------------------------------------------------
 @st.cache_data(ttl=20)
 def fetch_abates() -> pd.DataFrame:
     res = supabase.table("abates").select("*").order("data_abate").execute()
@@ -143,40 +155,50 @@ def fetch_abates() -> pd.DataFrame:
             df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
 
     # Numéricos
-    for c in ["peso_entrada_kg", "peso_abate_kg", "rendimento_carcaca_pct"]:
+    for c in ["peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg", "rendimento_carcaca_pct"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Métricas derivadas
     dt_ent = pd.to_datetime(df.get("data_entrada_confinamento"), errors="coerce")
     dt_aba = pd.to_datetime(df.get("data_abate"), errors="coerce")
 
+    # Dias confinado
     df["dias_confinado"] = np.where(
         (dt_ent.notna()) & (dt_aba.notna()),
-        (dt_aba - dt_ent).dt.days,
-        np.nan
+        (dt_aba - dt_ent).dt.days, np.nan
     )
+
+    # ---- NOVO: peso de carcaça e rendimento (consistência)
+    tem_abate = df.get("peso_abate_kg").notna()
+
+    mask_calc_pct = tem_abate & df.get("peso_carcaca_kg").notna()
+    df.loc[mask_calc_pct, "rendimento_carcaca_pct"] = (
+        df.loc[mask_calc_pct, "peso_carcaca_kg"] / df.loc[mask_calc_pct, "peso_abate_kg"]
+    )
+
+    mask_calc_peso = tem_abate & df.get("rendimento_carcaca_pct").notna() & df.get("peso_carcaca_kg").isna()
+    df.loc[mask_calc_peso, "peso_carcaca_kg"] = (
+        df.loc[mask_calc_peso, "peso_abate_kg"] * df.loc[mask_calc_peso, "rendimento_carcaca_pct"]
+    )
+
+    # Ganho e GMD
     df["ganho_peso_kg"] = np.where(
-        (df.get("peso_abate_kg").notna()) & (df.get("peso_entrada_kg").notna()),
-        df["peso_abate_kg"] - df["peso_entrada_kg"],
-        np.nan
+        df.get("peso_abate_kg").notna() & df.get("peso_entrada_kg").notna(),
+        df["peso_abate_kg"] - df["peso_entrada_kg"], np.nan
     )
     df["gmd_kg_dia"] = np.where(
-        (df["ganho_peso_kg"].notna()) & (df["dias_confinado"] > 0),
-        df["ganho_peso_kg"] / df["dias_confinado"],
-        np.nan
+        df["ganho_peso_kg"].notna() & (df["dias_confinado"] > 0),
+        df["ganho_peso_kg"] / df["dias_confinado"], np.nan
     )
-    df["peso_carcaca_kg"] = np.where(
-        (df.get("peso_abate_kg").notna()) & (df.get("rendimento_carcaca_pct").notna()),
-        df["peso_abate_kg"] * df["rendimento_carcaca_pct"],
-        np.nan
-    )
+
+    # Arrobas
     df["@_arrobas"] = df["peso_carcaca_kg"] / 15.0
 
     # Tempo (sem locale)
     df["ano"] = dt_aba.dt.year
     df["mes"] = dt_aba.dt.month
     df["mes_nome"] = df["mes"].map(MAPA_MES)
+    df["dia_mes"] = dt_aba.dt.day
 
     return df
 
@@ -205,7 +227,9 @@ def delete_abate(codigo: str, data_abate: date):
     fetch_abates.clear()
 
 
-# ------------------- SIDEBAR: FILTROS --------------
+# ---------------------------------------------------
+# SIDEBAR: FILTROS (inclui dia do mês)
+# ---------------------------------------------------
 st.sidebar.divider()
 st.sidebar.title("Filtro")
 
@@ -221,7 +245,12 @@ dest_sel = st.sidebar.multiselect("Destino (loja)", lojas_existentes, default=lo
 
 meses_sel = st.sidebar.multiselect("Meses", MESES, default=MESES)
 
-# ------------------- MONITOR DE USO ----------------
+dias_disponiveis = sorted(df_all_cache.loc[df_all_cache["ano"] == ano_sel, "dia_mes"].dropna().unique().tolist())
+dias_sel = st.sidebar.multiselect("Dias do mês", dias_disponiveis, default=dias_disponiveis)
+
+# ---------------------------------------------------
+# MONITOR DE USO (estimativa + opcional usage_events)
+# ---------------------------------------------------
 st.sidebar.divider()
 st.sidebar.subheader("📈 Uso do plano (estimativa)")
 
@@ -244,10 +273,19 @@ try:
 except Exception:
     st.sidebar.write("Requisições (mês): **–** (sem logging configurado)")
 
-# ------------------- TABS --------------------------
-tab1, tab2, tab3 = st.tabs(["➕ Cadastro/Manutenção", "📊 Dashboard (Geral)", "📈 Tabelas & Indicadores"])
+# ---------------------------------------------------
+# TABS
+# ---------------------------------------------------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "➕ Cadastro/Manutenção",
+    "📊 Dashboard (Geral)",
+    "📈 Tabelas & Indicadores",
+    "🧠 Insights & Resumos"
+])
 
-# ================ TAB 1: CADASTRO ==================
+# ===================================================
+# TAB 1 — CADASTRO / MANUTENÇÃO
+# ===================================================
 with tab1:
     st.subheader("Cadastrar/Editar Abate")
 
@@ -260,49 +298,79 @@ with tab1:
         with colC:
             origem = st.selectbox("Origem *", ORIGENS, index=0)
 
-        colD, colE, colF = st.columns(3)
-        with colD:
-            lojas = fetch_lojas()
-            lojas_opt = lojas + ["+ Cadastrar nova loja…"]
-            destino_sel = st.selectbox("Destino (loja) *", lojas_opt, index=0)
-            if destino_sel == "+ Cadastrar nova loja…":
-                destino = st.text_input("Nova loja (nome)", "")
+        # Destino 1 (obrigatório) e Destino 2 (opcional)
+        lojas = fetch_lojas()
+        lojas_opt = lojas + ["+ Cadastrar nova loja…"]
+
+        colD1, colD2 = st.columns(2)
+        with colD1:
+            destino1_sel = st.selectbox("Destino 1 (obrigatório) *", lojas_opt, index=0)
+            if destino1_sel == "+ Cadastrar nova loja…":
+                destino1 = st.text_input("Nova loja (Destino 1)", "")
             else:
-                destino = destino_sel
+                destino1 = destino1_sel
+
+        with colD2:
+            destino2_sel = st.selectbox("Destino 2 (opcional)", ["(sem 2ª loja)"] + lojas_opt, index=0)
+            if destino2_sel == "+ Cadastrar nova loja…":
+                destino2 = st.text_input("Nova loja (Destino 2)", "")
+            elif destino2_sel == "(sem 2ª loja)":
+                destino2 = None
+            else:
+                destino2 = destino2_sel
+
+        colE, colF = st.columns(2)
         with colE:
             data_entrada = st.date_input("Data de Entrada no Confinamento (se houver)", value=None, format="DD/MM/YYYY")
         with colF:
             data_abate = st.date_input("Data do Abate *", value=date.today(), format="DD/MM/YYYY")
 
-        colG, colH, colI = st.columns(3)
+        # Pesos
+        colG, colH, colI = st.columns([1, 1, 1])
         with colG:
             peso_entrada = st.number_input("Peso de Entrada (kg)", value=0.0, min_value=0.0, step=1.0)
         with colH:
             peso_abate = st.number_input("Peso de Abate (kg)", value=0.0, min_value=0.0, step=1.0)
         with colI:
-            rend_pct = st.number_input("Rendimento de Carcaça (%)", value=60.0, min_value=0.0, max_value=100.0, step=0.1)
+            peso_carcaca = st.number_input("Peso de Carcaça (kg) (preferível)", value=0.0, min_value=0.0, step=1.0)
+
+        rendimento_view = ""
+        if peso_abate and peso_carcaca:
+            rendimento_view = f"{(peso_carcaca / peso_abate) * 100:.2f}%"
+        st.caption(f"Rendimento de carcaça (calculado pela tela): **{rendimento_view or '–'}**")
 
         submitted = st.form_submit_button("Salvar registro")
         if submitted:
             if not codigo or not data_abate:
                 st.error("Preencha Código e Data do Abate.")
-            else:
-                if destino and destino not in fetch_lojas():
-                    add_loja_if_new(destino)
+                st.stop()
+            if not (destino1 or "").strip():
+                st.error("Destino 1 é obrigatório.")
+                st.stop()
 
-                payload = {
-                    "codigo": codigo.strip(),
-                    "sexo": sexo,
-                    "origem": origem,
-                    "destino": destino.strip() if destino else None,
-                    "data_entrada_confinamento": str(data_entrada) if data_entrada else None,
-                    "data_abate": str(data_abate),
-                    "peso_entrada_kg": float(peso_entrada) if peso_entrada else None,
-                    "peso_abate_kg": float(peso_abate) if peso_abate else None,
-                    "rendimento_carcaca_pct": float(rend_pct) / 100.0 if rend_pct is not None else None,
-                }
-                upsert_abate(payload)
-                st.success("Registro salvo.")
+            if destino1 and destino1 not in fetch_lojas():
+                add_loja_if_new(destino1)
+            if destino2 and destino2 not in fetch_lojas():
+                add_loja_if_new(destino2)
+
+            payload = {
+                "codigo": codigo.strip(),
+                "sexo": sexo,
+                "origem": origem,
+                "destino": destino1.strip() if destino1 else None,
+                "destino2": destino2.strip() if destino2 else None,
+                "data_entrada_confinamento": str(data_entrada) if data_entrada else None,
+                "data_abate": str(data_abate),
+                "peso_entrada_kg": float(peso_entrada) if peso_entrada else None,
+                "peso_abate_kg": float(peso_abate) if peso_abate else None,
+                "peso_carcaca_kg": float(peso_carcaca) if peso_carcaca else None,
+                "rendimento_carcaca_pct": (
+                    float(peso_carcaca) / float(peso_abate)
+                    if (peso_abate and peso_carcaca) else None
+                ),
+            }
+            upsert_abate(payload)
+            st.success("Registro salvo.")
 
     st.divider()
     st.subheader("Registros (filtro rápido)")
@@ -319,19 +387,22 @@ with tab1:
     if filtro_codigo:
         df_tab1 = df_tab1[df_tab1["codigo"].str.contains(filtro_codigo, case=False, na=False)]
     if filtro_destino:
-        df_tab1 = df_tab1[df_tab1["destino"].str.contains(filtro_destino, case=False, na=False)]
+        df_tab1 = df_tab1[
+            df_tab1["destino"].str.contains(filtro_destino, case=False, na=False) |
+            df_tab1.get("destino2", pd.Series(dtype=str)).fillna("").str.contains(filtro_destino, case=False, na=False)
+        ]
     if filtro_origem:
         df_tab1 = df_tab1[df_tab1["origem"].isin(filtro_origem)]
 
     st.dataframe(
         df_tab1[[
-            "codigo", "sexo", "origem", "destino", "data_entrada_confinamento",
-            "data_abate", "dias_confinado", "peso_entrada_kg", "peso_abate_kg",
-            "ganho_peso_kg", "gmd_kg_dia", "peso_carcaca_kg", "@_arrobas",
+            "codigo", "sexo", "origem", "destino", "destino2",
+            "data_entrada_confinamento", "data_abate", "dias_confinado",
+            "peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg",
+            "ganho_peso_kg", "gmd_kg_dia", "@_arrobas",
             "rendimento_carcaca_pct"
         ]].fillna(""),
-        use_container_width=True,
-        hide_index=True
+        use_container_width=True, hide_index=True
     )
 
     st.caption("Para excluir, informe Código + Data do Abate:")
@@ -348,7 +419,9 @@ with tab1:
             else:
                 st.warning("Informe Código e Data do Abate para excluir.")
 
-# ================ TAB 2: DASHBOARD =================
+# ===================================================
+# TAB 2 — DASHBOARD (Geral)
+# ===================================================
 with tab2:
     st.subheader("Visão geral (com filtros)")
     df_all = fetch_abates()
@@ -357,37 +430,32 @@ with tab2:
         (df_all["ano"] == ano_sel) &
         (df_all["origem"].isin(origem_sel)) &
         (df_all["mes_nome"].isin(meses_sel)) &
+        (df_all["dia_mes"].isin(dias_sel)) &
         (df_all["destino"].isin(dest_sel if dest_sel else df_all["destino"].unique()))
     )
     df = df_all.loc[mask_global].copy()
     df_registros_filtrados = df.copy()
 
-    # ---- KPIs (cards)
-    colm1, colm2, colm3, colm4 = st.columns(4)
-    with colm1:
+    # KPIs
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
         st.metric("Animais", len(df))
-    with colm2:
+    with k2:
         st.metric("Peso de Carcaça (kg)", f"{df['peso_carcaca_kg'].sum():,.0f}".replace(",", "."))
-    with colm3:
+    with k3:
         st.metric("GMD (kg/dia)", f"{df['gmd_kg_dia'].mean():.2f}" if not df.empty else "–")
-    with colm4:
+    with k4:
         st.metric("Rendimento médio (%)", f"{(df['rendimento_carcaca_pct']*100).mean():.2f}" if not df.empty else "–")
 
     st.divider()
 
-    # ---- GRÁFICOS (6 painéis: 3 linhas x 2 colunas)
-    # 1) Total de carcaça por mês
+    # 6 gráficos (3 linhas x 2 colunas)
     g1 = df.groupby("mes_nome", as_index=False)["peso_carcaca_kg"].sum().pipe(ordenar_por_mes)
-    # 2) Total de carcaça por origem
     g2 = df.groupby("origem", as_index=False)["peso_carcaca_kg"].sum().sort_values("peso_carcaca_kg", ascending=False)
-    # 3) Rendimento médio por mês
     g3 = df.groupby("mes_nome", as_index=False)["rendimento_carcaca_pct"].mean().pipe(ordenar_por_mes)
     g3["rendimento_%"] = g3["rendimento_carcaca_pct"] * 100
-    # 4) GMD médio por mês
     g4 = df.groupby("mes_nome", as_index=False)["gmd_kg_dia"].mean().pipe(ordenar_por_mes)
-    # 5) Ganho médio de peso por mês
     g5 = df.groupby("mes_nome", as_index=False)["ganho_peso_kg"].mean().pipe(ordenar_por_mes)
-    # 6) Animais por origem
     g6 = df.groupby("origem", as_index=False)["codigo"].count().rename(columns={"codigo": "qtd"}).sort_values("qtd", ascending=False)
 
     c1, c2 = st.columns(2)
@@ -421,7 +489,6 @@ with tab2:
                         use_container_width=True)
 
     st.divider()
-    # Exportação do que está filtrado
     csv_bytes = df_to_csv_bytes(df_registros_filtrados)
     st.download_button(
         "⬇ Baixar CSV (filtrado)", data=csv_bytes,
@@ -430,7 +497,9 @@ with tab2:
     )
     log_usage("export_csv", rows=len(df_registros_filtrados))
 
-# ================ TAB 3: TABELAS ===================
+# ===================================================
+# TAB 3 — TABELAS & INDICADORES
+# ===================================================
 with tab3:
     st.subheader("Pivôs e Indicadores")
     df_all = fetch_abates()
@@ -439,6 +508,7 @@ with tab3:
         (df_all["ano"] == ano_sel) &
         (df_all["origem"].isin(origem_sel)) &
         (df_all["mes_nome"].isin(meses_sel)) &
+        (df_all["dia_mes"].isin(dias_sel)) &
         (df_all["destino"].isin(dest_sel if dest_sel else df_all["destino"].unique()))
     )
     df = df_all.loc[mask_global].copy()
@@ -475,3 +545,80 @@ with tab3:
             key="dl_xlsx_tab3"
         )
         log_usage("export_xlsx", rows=len(df))
+
+# ===================================================
+# TAB 4 — INSIGHTS & RESUMOS (dia, semana, mês)
+# ===================================================
+with tab4:
+    st.subheader("Insights & Resumos")
+    df_all = fetch_abates()
+
+    mask_global = (
+        (df_all["ano"] == ano_sel) &
+        (df_all["origem"].isin(origem_sel)) &
+        (df_all["mes_nome"].isin(meses_sel)) &
+        (df_all["dia_mes"].isin(dias_sel)) &
+        (df_all["destino"].isin(dest_sel if dest_sel else df_all["destino"].unique()))
+    )
+    dfi = df_all.loc[mask_global].copy()
+
+    if dfi.empty:
+        st.info("Sem dados para os filtros selecionados.")
+        st.stop()
+
+    dti = pd.to_datetime(dfi["data_abate"], errors="coerce")
+
+    # Por dia
+    grp_day = dfi.groupby(dti.dt.date).agg(
+        animais=("codigo", "count"),
+        carcaca_kg=("peso_carcaca_kg", "sum"),
+        gmd_media=("gmd_kg_dia", "mean"),
+        rendimento_pct=("rendimento_carcaca_pct", lambda s: (s.mean() * 100) if len(s) > 0 else np.nan)
+    ).reset_index(names="data").sort_values("data")
+
+    # Por semana (segunda como início)
+    semana = dti.dt.to_period("W-MON").astype(str)
+    grp_week = dfi.groupby(semana).agg(
+        animais=("codigo", "count"),
+        carcaca_kg=("peso_carcaca_kg", "sum"),
+        gmd_media=("gmd_kg_dia", "mean"),
+        rendimento_pct=("rendimento_carcaca_pct", lambda s: (s.mean() * 100) if len(s) > 0 else np.nan)
+    ).reset_index(names="semana")
+
+    # Por mês
+    grp_month = dfi.groupby("mes_nome").agg(
+        animais=("codigo", "count"),
+        carcaca_kg=("peso_carcaca_kg", "sum"),
+        gmd_media=("gmd_kg_dia", "mean"),
+        rendimento_pct=("rendimento_carcaca_pct", lambda s: (s.mean() * 100) if len(s) > 0 else np.nan)
+    ).reset_index()
+    grp_month = ordenar_por_mes(grp_month)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Resumo por Dia**")
+        st.dataframe(grp_day, use_container_width=True, hide_index=True)
+    with c2:
+        st.markdown("**Resumo por Semana**")
+        st.dataframe(grp_week, use_container_width=True, hide_index=True)
+
+    st.markdown("**Resumo por Mês**")
+    st.dataframe(grp_month, use_container_width=True, hide_index=True)
+
+    st.divider()
+    colD, colW, colM = st.columns(3)
+    with colD:
+        st.plotly_chart(
+            px.bar(grp_day, x="data", y="carcaca_kg", title="Carcaça (kg) por Dia"),
+            use_container_width=True
+        )
+    with colW:
+        st.plotly_chart(
+            px.bar(grp_week, x="semana", y="carcaca_kg", title="Carcaça (kg) por Semana"),
+            use_container_width=True
+        )
+    with colM:
+        st.plotly_chart(
+            px.bar(grp_month, x="mes_nome", y="carcaca_kg", title="Carcaça (kg) por Mês"),
+            use_container_width=True
+        )
