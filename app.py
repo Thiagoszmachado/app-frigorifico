@@ -21,7 +21,7 @@ except Exception:
 # ------------------------ PAGE CONFIG (primeiro!) ------------------------
 st.set_page_config(
     page_title="FriGard",
-    page_icon='frigard corel.png',
+    page_icon='🐂',
     layout="wide",
 )
 
