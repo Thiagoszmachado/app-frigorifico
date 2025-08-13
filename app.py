@@ -394,9 +394,10 @@ with tab3:
             )
 
             st.download_button(
-                label="📥 Exportar relatório anual",
-                data=excel_anual_buf,
-                file_name="relatorio_anual.xlsx",
+                label="📥 Exportar filtrado",
+                data=excel_filtrado_buf,  # variável certa para esse caso
+                file_name="registros_filtrados.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_relatorio_anual"
+                key="download_registros_filtrados"
             )
+
