@@ -21,15 +21,18 @@ except Exception:
 # ------------------------ PAGE CONFIG (primeiro!) ------------------------
 st.set_page_config(
     page_title="Controle de Abate de Boi",
-    page_icon="🥩",
+    page_icon="🐂",
     layout="wide",
 )
+
+# Logo na barra lateral (redimensiona no mobile)
+st.sidebar.image("frigard corel.png", use_column_width=True)
 
 # ------------------------------- LOGO ------------------------------------
 try:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image("frigard corel.png", width=600
+        st.image("frigard corel.png", width=True
         )
 except Exception:
     pass
