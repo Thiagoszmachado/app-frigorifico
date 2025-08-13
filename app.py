@@ -82,22 +82,23 @@ def make_excel_workbook(df_registros: pd.DataFrame,
     """Gera Excel com aba Registros + abas extras (pivôs), com ajuste de largura robusto."""
     output = BytesIO()
 
-    # Se xlsxwriter não está instalado, devolve um "arquivo" vazio para não quebrar o app
     if not HAS_XLSXWRITER:
         output.write(b"")
         output.seek(0)
         return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        # Copia e formata datas como texto DD/MM/YYYY
-        safe = (df_registros or pd.DataFrame()).copy()
+        # --- AQUI ESTÁ A CORREÇÃO ---
+        if df_registros is None or not isinstance(df_registros, pd.DataFrame) or df_registros.empty:
+            safe = pd.DataFrame({"(sem dados)": [""]})
+        else:
+            safe = df_registros.copy()
+        # -----------------------------
+
+        # Datas como texto
         for c in ["data_entrada_confinamento", "data_abate", "created_at"]:
             if c in safe.columns:
                 safe[c] = pd.to_datetime(safe[c], errors="coerce").dt.strftime("%d/%m/%Y")
-
-        # Garante que existe ao menos uma coluna para escrever
-        if safe.empty:
-            safe = pd.DataFrame({"(sem dados)": [""]})
 
         # Aba principal
         safe.to_excel(writer, sheet_name="Registros", index=False)
@@ -108,34 +109,25 @@ def make_excel_workbook(df_registros: pd.DataFrame,
                 if isinstance(dfp, pd.DataFrame) and not dfp.empty:
                     dfp.to_excel(writer, sheet_name=name[:31], index=True)
 
-        # Ajuste seguro de largura de colunas
+        # Ajuste seguro de largura
         ws0 = writer.sheets["Registros"]
         for i, col in enumerate(safe.columns):
             try:
-                # Comprimento das strings sem "nan"
-                s = safe[col].astype(str)
-                s = s.replace({"nan": ""})
+                s = safe[col].astype(str).replace({"nan": ""})
                 lens = s.str.len()
-
-                # Se ficar tudo vazio, define um comprimento base
                 if lens.dropna().empty:
                     q = 10
                 else:
                     q = lens.fillna(0).quantile(0.9)
                     if pd.isna(q):
                         q = 10
-
-                width = int(q) + 2
-                width = max(10, min(35, width))
+                width = max(10, min(35, int(q) + 2))
             except Exception:
-                # Fallback de segurança
                 width = 15
-
             ws0.set_column(i, i, width)
 
     output.seek(0)
     return output
-
 
 def add_loja_if_new(nome_loja: str):
     nome_loja = (nome_loja or "").strip()
