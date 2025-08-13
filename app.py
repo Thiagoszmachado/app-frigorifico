@@ -7,13 +7,13 @@ from supabase import create_client, Client
 from PIL import Image
 import streamlit as st
 
-# Carrega a logo
 logo = Image.open("frigard corel.png")
 
-# Centraliza usando coluna vazia dos lados
+# Centralizado com largura fixa (compatível com versões antigas)
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
-    st.image(logo, use_container_width=True)
+    st.image(logo, width=600)  # ajuste 600 para o tamanho que preferir
+
 
 # ===================== CONFIG =====================
 st.set_page_config(page_title="Controle de Abate de Boi", layout="wide")
