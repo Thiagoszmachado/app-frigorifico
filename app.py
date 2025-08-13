@@ -386,17 +386,17 @@ with tab3:
         colx, coly = st.columns(2)
         with colx:
             st.download_button(
-                "⬇️ Baixar Excel (registros + pivôs)",
-                data=excel_buf.getvalue(),
-                file_name=f"abates_{ano_sel}_resumo.xlsx",
+                label="📥 Exportar registros",
+                data=excel_buf,
+                file_name="registros.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                key="download_registros"
             )
-        with coly:
+
             st.download_button(
-                "⬇️ Baixar CSV (registros filtrados)",
-                data=df_to_csv_bytes(df),
-                file_name=f"abates_{ano_sel}_filtros.csv",
-                mime="text/csv",
-                use_container_width=True
+                label="📥 Exportar relatório anual",
+                data=excel_anual_buf,
+                file_name="relatorio_anual.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_relatorio_anual"
             )
