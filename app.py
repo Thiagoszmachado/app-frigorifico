@@ -29,7 +29,7 @@ st.set_page_config(
 try:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image("frigard corel.png", width=true
+        st.image("frigard corel.png", width=600
         )
 except Exception:
     pass
