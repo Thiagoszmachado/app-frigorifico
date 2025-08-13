@@ -187,6 +187,31 @@ dest_sel = st.sidebar.multiselect("Destino (loja)", lojas_existentes, default=lo
 
 meses_sel = st.sidebar.multiselect("Meses", MESES, default=MESES)
 
+# ----- MONITOR DE USO (estimativa) -----
+st.sidebar.divider()
+st.sidebar.subheader("📈 Uso do plano (estimativa)")
+
+# Espaço no banco (suposição ~0,5 KB por linha)
+total_linhas = len(df_all_cache)
+kb_est = total_linhas * 0.5
+mb_est = kb_est / 1024
+st.sidebar.write(f"Registros: **{total_linhas}**")
+st.sidebar.write(f"Espaço estimado: **{mb_est:.2f} MB** / 500 MB")
+st.sidebar.progress(min(1.0, mb_est / 500.0), text="Limite de 500 MB")
+
+# Requisições no mês (se existir a tabela usage_events)
+from datetime import datetime
+inicio_mes = datetime(datetime.now().year, datetime.now().month, 1)
+try:
+    usage = supabase.table("usage_events").select("id") \
+        .gte("created_at", inicio_mes.isoformat()) \
+        .execute()
+    reqs_mes = len(usage.data or [])
+    st.sidebar.write(f"Requisições (mês): **{reqs_mes}** / 50.000")
+    st.sidebar.progress(min(1.0, reqs_mes / 50000.0), text="Limite de 50.000 req/mês")
+except Exception:
+    st.sidebar.write("Requisições (mês): **–** (sem logging configurado)")
+
 # --------------------------------- TABS ----------------------------------
 tab1, tab2, tab3 = st.tabs([
     "➕ Cadastro/Manutenção",
