@@ -78,6 +78,14 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 
+def fmt3(v):
+    """Formata com 3 casas e vírgula como separador decimal: 0,000"""
+    try:
+        return f"{float(v):,.3f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    except Exception:
+        return "–"
+
+
 def make_excel_workbook(df_registros: pd.DataFrame,
                         sheets: dict[str, pd.DataFrame] | None = None) -> BytesIO:
     """Gera Excel com aba Registros + abas extras (pivôs), com ajuste de largura robusto."""
@@ -361,7 +369,6 @@ with tab1:
             if find_codigo and find_data:
                 rec = _get_record(find_codigo, find_data)
                 if rec:
-                    # Salva defaults do formulário na sessão para pré-preencher
                     st.session_state["form_defaults"] = {
                         "codigo": rec.get("codigo", ""),
                         "sexo": rec.get("sexo", "M"),
@@ -385,7 +392,6 @@ with tab1:
     # ========== FORMULÁRIO: CADASTRAR / EDITAR ==========
     st.markdown("### ✍️ Formulário de cadastro/edição")
 
-    # Defaults se vieram do "Carregar"
     _d = st.session_state.get("form_defaults", {})
     defv_codigo = _d.get("codigo", "")
     defv_sexo = _d.get("sexo", SEXO[0] if SEXO else "M")
@@ -482,10 +488,10 @@ with tab1:
 
         st.caption(
             f"Rendimento de carcaça (calculado pela tela): **{rendimento_view or '–'}**  |  "
-            f"Peso equivalente (kg): **{peso_equivalente_view:.2f}**" if peso_equivalente_view is not None else "Peso equivalente (kg): **–**"
+            f"Peso equivalente (kg): **{fmt3(peso_equivalente_view)}**" if peso_equivalente_view is not None else "Peso equivalente (kg): **–**"
         )
         st.caption(
-            f"GMD equivalente (kg/dia): **{gmd_equivalente_view:.4f}**" if gmd_equivalente_view is not None else "GMD equivalente (kg/dia): **–**"
+            f"GMD equivalente (kg/dia): **{fmt3(gmd_equivalente_view)}**" if gmd_equivalente_view is not None else "GMD equivalente (kg/dia): **–**"
         )
 
         submitted = st.form_submit_button("Salvar (inserir/atualizar)")
@@ -538,7 +544,6 @@ with tab1:
             }
 
             upsert_abate(payload)
-            # Limpa defaults após salvar
             st.session_state.pop("form_defaults", None)
             st.success("Registro inserido/atualizado com sucesso.")
 
@@ -565,8 +570,14 @@ with tab1:
     if filtro_origem:
         df_tab1 = df_tab1[df_tab1["origem"].isin(filtro_origem)]
 
+    # Formatação visual 0,000 nos dois campos
+    df_show = df_tab1.copy()
+    for col in ["peso_equivalente_carcaca_kg", "gmd_equivalente_kg_dia"]:
+        if col in df_show.columns:
+            df_show[col] = df_show[col].map(fmt3)
+
     st.dataframe(
-        df_tab1[[
+        df_show[[
             "codigo", "sexo", "origem", "destino", "destino2",
             "data_entrada_confinamento", "data_abate", "dias_confinado",
             "peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg",
@@ -619,9 +630,9 @@ with tab2:
     with k4:
         st.metric("Rendimento médio (%)", f"{(df['rendimento_carcaca_pct']*100).mean():.2f}" if not df.empty else "–")
     with k5:
-        st.metric("Peso Equivalente (kg)", f"{df['peso_equivalente_carcaca_kg'].sum():,.0f}".replace(",", ".") if 'peso_equivalente_carcaca_kg' in df.columns and not df.empty else "–")
+        st.metric("Peso Equivalente (kg)", fmt3(df["peso_equivalente_carcaca_kg"].sum()) if 'peso_equivalente_carcaca_kg' in df.columns and not df.empty else "–")
     with k6:
-        st.metric("GMD Equivalente (kg/dia)", f"{df['gmd_equivalente_kg_dia'].mean():.2f}" if 'gmd_equivalente_kg_dia' in df.columns and not df.empty else "–")
+        st.metric("GMD Equivalente (kg/dia)", fmt3(df["gmd_equivalente_kg_dia"].mean()) if 'gmd_equivalente_kg_dia' in df.columns and not df.empty else "–")
 
     st.divider()
 
@@ -674,11 +685,10 @@ with tab2:
             use_container_width=True
         )
     with c8_:
-        st.plotly_chart(
-            px.line(g8, x="mes_nome", y="gmd_equivalente_kg_dia",
-                    markers=True, title="GMD equivalente por mês (kg/dia)"),
-            use_container_width=True
-        )
+        fig_g8 = px.line(g8, x="mes_nome", y="gmd_equivalente_kg_dia",
+                         markers=True, title="GMD equivalente por mês (kg/dia)")
+        fig_g8.update_traces(hovertemplate="%{x}<br>GMD eq.: %{y:.3f}")
+        st.plotly_chart(fig_g8, use_container_width=True)
 
     st.divider()
 
