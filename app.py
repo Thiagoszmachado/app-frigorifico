@@ -130,6 +130,7 @@ def make_excel_workbook(df_registros: pd.DataFrame,
     output.seek(0)
     return output
 
+
 def add_loja_if_new(nome_loja: str):
     nome_loja = (nome_loja or "").strip()
     if not nome_loja:
@@ -178,7 +179,8 @@ def fetch_abates() -> pd.DataFrame:
             df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
 
     # Numéricos
-    for c in ["peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg", "rendimento_carcaca_pct"]:
+    for c in ["peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg", "rendimento_carcaca_pct",
+              "peso_equivalente_carcaca_kg", "gmd_equivalente_kg_dia"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -191,7 +193,7 @@ def fetch_abates() -> pd.DataFrame:
         (dt_aba - dt_ent).dt.days, np.nan
     )
 
-    # ---- NOVO: peso de carcaça e rendimento (consistência)
+    # Consistência carcaça e rendimento
     tem_abate = df.get("peso_abate_kg").notna()
 
     mask_calc_pct = tem_abate & df.get("peso_carcaca_kg").notna()
@@ -216,6 +218,29 @@ def fetch_abates() -> pd.DataFrame:
 
     # Arrobas
     df["@_arrobas"] = df["peso_carcaca_kg"] / 15.0
+
+    # ---- CAMPOS EQUIVALENTES (fallback se vierem nulos do banco)
+    # peso_equivalente_carcaca_kg = (peso_carcaca_kg/15)*30 = peso_carcaca_kg * 2
+    if "peso_equivalente_carcaca_kg" not in df.columns:
+        df["peso_equivalente_carcaca_kg"] = np.nan
+    df["peso_equivalente_carcaca_kg"] = df["peso_equivalente_carcaca_kg"].where(
+        df["peso_equivalente_carcaca_kg"].notna(),
+        df["peso_carcaca_kg"] * 2.0
+    )
+
+    # gmd_equivalente_kg_dia = (peso_equivalente - peso_entrada) / dias_confinado
+    if "gmd_equivalente_kg_dia" not in df.columns:
+        df["gmd_equivalente_kg_dia"] = np.nan
+    df["gmd_equivalente_kg_dia"] = df["gmd_equivalente_kg_dia"].where(
+        df["gmd_equivalente_kg_dia"].notna(),
+        np.where(
+            (df["dias_confinado"] > 0)
+            & df["peso_entrada_kg"].notna()
+            & df["peso_carcaca_kg"].notna(),
+            ((df["peso_carcaca_kg"] * 2.0) - df["peso_entrada_kg"]) / df["dias_confinado"],
+            np.nan
+        )
+    )
 
     # Tempo (sem locale)
     df["ano"] = dt_aba.dt.year
@@ -310,59 +335,160 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1 — CADASTRO / MANUTENÇÃO
 # ===================================================
 with tab1:
-    st.subheader("Cadastrar/Editar Abate")
+    st.subheader("Cadastrar / Editar / Excluir Abate")
+
+    # ---------- Utils para edição ----------
+    def _get_record(codigo_: str, data_abate_dt: date) -> dict | None:
+        try:
+            res = supabase.table("abates").select("*") \
+                .eq("codigo", codigo_.strip()) \
+                .eq("data_abate", str(data_abate_dt)) \
+                .limit(1).execute()
+            rows = res.data or []
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    # ========== BLOCO: CARREGAR REGISTRO PARA EDIÇÃO ==========
+    st.markdown("### 🔎 Carregar registro para edição")
+    col_find_a, col_find_b, col_find_c = st.columns([1, 1, 0.5])
+    with col_find_a:
+        find_codigo = st.text_input("Código (buscar)", key="find_codigo")
+    with col_find_b:
+        find_data = st.date_input("Data do Abate (buscar)", value=None, format="DD/MM/YYYY", key="find_data")
+    with col_find_c:
+        if st.button("Carregar", type="secondary"):
+            if find_codigo and find_data:
+                rec = _get_record(find_codigo, find_data)
+                if rec:
+                    # Salva defaults do formulário na sessão para pré-preencher
+                    st.session_state["form_defaults"] = {
+                        "codigo": rec.get("codigo", ""),
+                        "sexo": rec.get("sexo", "M"),
+                        "origem": rec.get("origem", ORIGENS[0]),
+                        "destino1": rec.get("destino", ""),
+                        "destino2": rec.get("destino2", None),
+                        "data_entrada": rec.get("data_entrada_confinamento", None),
+                        "data_abate": rec.get("data_abate", date.today().isoformat()),
+                        "peso_entrada": float(rec.get("peso_entrada_kg") or 0.0),
+                        "peso_abate": float(rec.get("peso_abate_kg") or 0.0),
+                        "peso_carcaca": float(rec.get("peso_carcaca_kg") or 0.0),
+                    }
+                    st.success("Registro carregado no formulário abaixo.")
+                else:
+                    st.warning("Registro não encontrado para os parâmetros informados.")
+            else:
+                st.info("Informe Código e Data para carregar.")
+
+    st.divider()
+
+    # ========== FORMULÁRIO: CADASTRAR / EDITAR ==========
+    st.markdown("### ✍️ Formulário de cadastro/edição")
+
+    # Defaults se vieram do "Carregar"
+    _d = st.session_state.get("form_defaults", {})
+    defv_codigo = _d.get("codigo", "")
+    defv_sexo = _d.get("sexo", SEXO[0] if SEXO else "M")
+    defv_origem = _d.get("origem", ORIGENS[0] if ORIGENS else "")
+    defv_dest1 = _d.get("destino1", "")
+    defv_dest2 = _d.get("destino2", None)
+    defv_data_ent = _d.get("data_entrada", None)
+    defv_data_aba = _d.get("data_abate", date.today().isoformat())
+    defv_peso_ent = _d.get("peso_entrada", 0.0)
+    defv_peso_aba = _d.get("peso_abate", 0.0)
+    defv_peso_car = _d.get("peso_carcaca", 0.0)
 
     with st.form("form_cadastro", clear_on_submit=False):
         colA, colB, colC = st.columns(3)
         with colA:
-            codigo = st.text_input("Código *", "")
+            codigo = st.text_input("Código *", defv_codigo)
         with colB:
-            sexo = st.selectbox("Sexo *", SEXO, index=0)
+            sexo = st.selectbox("Sexo *", SEXO, index=(SEXO.index(defv_sexo) if defv_sexo in SEXO else 0))
         with colC:
-            origem = st.selectbox("Origem *", ORIGENS, index=0)
+            origem = st.selectbox("Origem *", ORIGENS, index=(ORIGENS.index(defv_origem) if defv_origem in ORIGENS else 0))
 
-        # Destino 1 (obrigatório) e Destino 2 (opcional)
+        # Destinos
         lojas = fetch_lojas()
         lojas_opt = lojas + ["+ Cadastrar nova loja…"]
 
         colD1, colD2 = st.columns(2)
         with colD1:
-            destino1_sel = st.selectbox("Destino 1 (obrigatório) *", lojas_opt, index=0)
-            if destino1_sel == "+ Cadastrar nova loja…":
+            idx_dest1 = lojas_opt.index(defv_dest1) if (defv_dest1 in lojas_opt) else 0
+            dest1_sel = st.selectbox("Destino 1 (obrigatório) *", lojas_opt, index=idx_dest1)
+            if dest1_sel == "+ Cadastrar nova loja…":
                 destino1 = st.text_input("Nova loja (Destino 1)", "")
             else:
-                destino1 = destino1_sel
+                destino1 = dest1_sel or defv_dest1
 
         with colD2:
-            destino2_sel = st.selectbox("Destino 2 (opcional)", ["(sem 2ª loja)"] + lojas_opt, index=0)
-            if destino2_sel == "+ Cadastrar nova loja…":
-                destino2 = st.text_input("Nova loja (Destino 2)", "")
-            elif destino2_sel == "(sem 2ª loja)":
+            base_opts = ["(sem 2ª loja)"] + lojas_opt
+            if defv_dest2 and defv_dest2 not in base_opts:
+                base_opts = ["(sem 2ª loja)", defv_dest2] + lojas_opt
+            idx_dest2 = base_opts.index(defv_dest2) if (defv_dest2 in base_opts) else 0
+            dest2_sel = st.selectbox("Destino 2 (opcional)", base_opts, index=idx_dest2)
+            if dest2_sel == "+ Cadastrar nova loja…":
+                destino2 = st.text_input("Nova loja (Destino 2)", defv_dest2 or "")
+            elif dest2_sel == "(sem 2ª loja)":
                 destino2 = None
             else:
-                destino2 = destino2_sel
+                destino2 = dest2_sel
 
         colE, colF = st.columns(2)
         with colE:
-            data_entrada = st.date_input("Data de Entrada no Confinamento (se houver)", value=None, format="DD/MM/YYYY")
+            data_entrada = st.date_input(
+                "Data de Entrada no Confinamento (se houver)",
+                value=(pd.to_datetime(defv_data_ent).date() if defv_data_ent else None),
+                format="DD/MM/YYYY"
+            )
         with colF:
-            data_abate = st.date_input("Data do Abate *", value=date.today(), format="DD/MM/YYYY")
+            data_abate = st.date_input(
+                "Data do Abate *",
+                value=(pd.to_datetime(defv_data_aba).date() if defv_data_aba else date.today()),
+                format="DD/MM/YYYY"
+            )
 
         # Pesos
         colG, colH, colI = st.columns([1, 1, 1])
         with colG:
-            peso_entrada = st.number_input("Peso de Entrada (kg)", value=0.0, min_value=0.0, step=1.0)
+            peso_entrada = st.number_input("Peso de Entrada (kg)", value=float(defv_peso_ent), min_value=0.0, step=1.0)
         with colH:
-            peso_abate = st.number_input("Peso de Abate (kg)", value=0.0, min_value=0.0, step=1.0)
+            peso_abate = st.number_input("Peso de Abate (kg)", value=float(defv_peso_aba), min_value=0.0, step=1.0)
         with colI:
-            peso_carcaca = st.number_input("Peso de Carcaça (kg) (preferível)", value=0.0, min_value=0.0, step=1.0)
+            peso_carcaca = st.number_input("Peso de Carcaça (kg) (preferível)", value=float(defv_peso_car), min_value=0.0, step=1.0)
 
+        # Calculados em tela (visuais)
         rendimento_view = ""
         if peso_abate and peso_carcaca:
             rendimento_view = f"{(peso_carcaca / peso_abate) * 100:.2f}%"
-        st.caption(f"Rendimento de carcaça (calculado pela tela): **{rendimento_view or '–'}**")
 
-        submitted = st.form_submit_button("Salvar registro")
+        # Dias confinado (para GMD equivalente)
+        dias_confinado_calc = None
+        if data_entrada and data_abate:
+            try:
+                dias_confinado_calc = (pd.to_datetime(str(data_abate)) - pd.to_datetime(str(data_entrada))).days
+                if dias_confinado_calc is not None and dias_confinado_calc <= 0:
+                    dias_confinado_calc = None
+            except Exception:
+                dias_confinado_calc = None
+
+        # Peso equivalente e GMD equivalente (em tela)
+        peso_equivalente_view = None
+        gmd_equivalente_view = None
+        if peso_carcaca:
+            peso_equivalente_view = float(peso_carcaca) * 2.0  # (carcaça/15)*30
+
+        if peso_equivalente_view is not None and peso_entrada and dias_confinado_calc and dias_confinado_calc > 0:
+            gmd_equivalente_view = (peso_equivalente_view - float(peso_entrada)) / float(dias_confinado_calc)
+
+        st.caption(
+            f"Rendimento de carcaça (calculado pela tela): **{rendimento_view or '–'}**  |  "
+            f"Peso equivalente (kg): **{peso_equivalente_view:.2f}**" if peso_equivalente_view is not None else "Peso equivalente (kg): **–**"
+        )
+        st.caption(
+            f"GMD equivalente (kg/dia): **{gmd_equivalente_view:.4f}**" if gmd_equivalente_view is not None else "GMD equivalente (kg/dia): **–**"
+        )
+
+        submitted = st.form_submit_button("Salvar (inserir/atualizar)")
         if submitted:
             if not codigo or not data_abate:
                 st.error("Preencha Código e Data do Abate.")
@@ -371,10 +497,28 @@ with tab1:
                 st.error("Destino 1 é obrigatório.")
                 st.stop()
 
+            # Garante cadastro das lojas novas
             if destino1 and destino1 not in fetch_lojas():
                 add_loja_if_new(destino1)
             if destino2 and destino2 not in fetch_lojas():
                 add_loja_if_new(destino2)
+
+            # Campos calculados para persistir
+            rendimento_pct_store = (float(peso_carcaca) / float(peso_abate)) if (peso_abate and peso_carcaca) else None
+            peso_equivalente_store = (float(peso_carcaca) * 2.0) if peso_carcaca else None
+            gmd_equivalente_store = None
+            if (
+                peso_equivalente_store is not None
+                and peso_entrada
+                and data_entrada
+                and data_abate
+            ):
+                try:
+                    _dias = (pd.to_datetime(str(data_abate)) - pd.to_datetime(str(data_entrada))).days
+                    if _dias and _dias > 0:
+                        gmd_equivalente_store = (peso_equivalente_store - float(peso_entrada)) / float(_dias)
+                except Exception:
+                    gmd_equivalente_store = None
 
             payload = {
                 "codigo": codigo.strip(),
@@ -387,17 +531,21 @@ with tab1:
                 "peso_entrada_kg": float(peso_entrada) if peso_entrada else None,
                 "peso_abate_kg": float(peso_abate) if peso_abate else None,
                 "peso_carcaca_kg": float(peso_carcaca) if peso_carcaca else None,
-                "rendimento_carcaca_pct": (
-                    float(peso_carcaca) / float(peso_abate)
-                    if (peso_abate and peso_carcaca) else None
-                ),
+                "rendimento_carcaca_pct": rendimento_pct_store,
+                # Novos campos persistidos
+                "peso_equivalente_carcaca_kg": peso_equivalente_store,
+                "gmd_equivalente_kg_dia": gmd_equivalente_store,
             }
+
             upsert_abate(payload)
-            st.success("Registro salvo.")
+            # Limpa defaults após salvar
+            st.session_state.pop("form_defaults", None)
+            st.success("Registro inserido/atualizado com sucesso.")
 
     st.divider()
-    st.subheader("Registros (filtro rápido)")
 
+    # ========== LISTA / FILTROS RÁPIDOS ==========
+    st.subheader("Registros (filtro rápido)")
     colf1, colf2, colf3 = st.columns(3)
     with colf1:
         filtro_codigo = st.text_input("Filtrar por Código contém")
@@ -422,12 +570,13 @@ with tab1:
             "codigo", "sexo", "origem", "destino", "destino2",
             "data_entrada_confinamento", "data_abate", "dias_confinado",
             "peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg",
-            "ganho_peso_kg", "gmd_kg_dia", "@_arrobas",
-            "rendimento_carcaca_pct"
+            "peso_equivalente_carcaca_kg", "ganho_peso_kg", "gmd_kg_dia",
+            "gmd_equivalente_kg_dia", "@_arrobas", "rendimento_carcaca_pct"
         ]].fillna(""),
         use_container_width=True, hide_index=True
     )
 
+    # ========== EXCLUSÃO ==========
     st.caption("Para excluir, informe Código + Data do Abate:")
     colx, coly, colz = st.columns(3)
     with colx:
@@ -435,7 +584,7 @@ with tab1:
     with coly:
         del_data = st.date_input("Data do Abate (excluir)", value=None, format="DD/MM/YYYY")
     with colz:
-        if st.button("Excluir um registro"):
+        if st.button("Excluir um registro", type="primary"):
             if del_codigo and del_data:
                 delete_abate(del_codigo.strip(), del_data)
                 st.success("Registro excluído.")
@@ -459,8 +608,8 @@ with tab2:
     df = df_all.loc[mask_global].copy()
     df_registros_filtrados = df.copy()
 
-    # KPIs
-    k1, k2, k3, k4 = st.columns(4)
+    # ================== KPIs ==================
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     with k1:
         st.metric("Animais", len(df))
     with k2:
@@ -469,10 +618,14 @@ with tab2:
         st.metric("GMD (kg/dia)", f"{df['gmd_kg_dia'].mean():.2f}" if not df.empty else "–")
     with k4:
         st.metric("Rendimento médio (%)", f"{(df['rendimento_carcaca_pct']*100).mean():.2f}" if not df.empty else "–")
+    with k5:
+        st.metric("Peso Equivalente (kg)", f"{df['peso_equivalente_carcaca_kg'].sum():,.0f}".replace(",", ".") if 'peso_equivalente_carcaca_kg' in df.columns and not df.empty else "–")
+    with k6:
+        st.metric("GMD Equivalente (kg/dia)", f"{df['gmd_equivalente_kg_dia'].mean():.2f}" if 'gmd_equivalente_kg_dia' in df.columns and not df.empty else "–")
 
     st.divider()
 
-    # 6 gráficos (3 linhas x 2 colunas)
+    # ================== GRÁFICOS GERAIS ==================
     g1 = df.groupby("mes_nome", as_index=False)["peso_carcaca_kg"].sum().pipe(ordenar_por_mes)
     g2 = df.groupby("origem", as_index=False)["peso_carcaca_kg"].sum().sort_values("peso_carcaca_kg", ascending=False)
     g3 = df.groupby("mes_nome", as_index=False)["rendimento_carcaca_pct"].mean().pipe(ordenar_por_mes)
@@ -480,36 +633,83 @@ with tab2:
     g4 = df.groupby("mes_nome", as_index=False)["gmd_kg_dia"].mean().pipe(ordenar_por_mes)
     g5 = df.groupby("mes_nome", as_index=False)["ganho_peso_kg"].mean().pipe(ordenar_por_mes)
     g6 = df.groupby("origem", as_index=False)["codigo"].count().rename(columns={"codigo": "qtd"}).sort_values("qtd", ascending=False)
+    g7 = df.groupby("mes_nome", as_index=False)["peso_equivalente_carcaca_kg"].sum().pipe(ordenar_por_mes)
+    g8 = df.groupby("mes_nome", as_index=False)["gmd_equivalente_kg_dia"].mean().pipe(ordenar_por_mes)
 
-    c1, c2 = st.columns(2)
-    with c1:
+    c1_, c2_ = st.columns(2)
+    with c1_:
         st.plotly_chart(px.bar(g1, x="mes_nome", y="peso_carcaca_kg",
                                title="Total de carcaça por mês (kg)"),
                         use_container_width=True)
-    with c2:
+    with c2_:
         st.plotly_chart(px.bar(g2, x="origem", y="peso_carcaca_kg",
                                title="Total de carcaça por origem (kg)"),
                         use_container_width=True)
 
-    c3, c4 = st.columns(2)
-    with c3:
+    c3_, c4_ = st.columns(2)
+    with c3_:
         st.plotly_chart(px.line(g3, x="mes_nome", y="rendimento_%",
                                 markers=True, title="Rendimento médio por mês (%)"),
                         use_container_width=True)
-    with c4:
+    with c4_:
         st.plotly_chart(px.line(g4, x="mes_nome", y="gmd_kg_dia",
                                 markers=True, title="GMD médio por mês (kg/dia)"),
                         use_container_width=True)
 
-    c5, c6 = st.columns(2)
-    with c5:
+    c5_, c6_ = st.columns(2)
+    with c5_:
         st.plotly_chart(px.bar(g5, x="mes_nome", y="ganho_peso_kg",
                                title="Ganho médio de peso por mês (kg)"),
                         use_container_width=True)
-    with c6:
+    with c6_:
         st.plotly_chart(px.pie(g6, names="origem", values="qtd",
                                title="Distribuição de animais por origem"),
                         use_container_width=True)
+
+    c7_, c8_ = st.columns(2)
+    with c7_:
+        st.plotly_chart(
+            px.bar(g7, x="mes_nome", y="peso_equivalente_carcaca_kg",
+                   title="Peso equivalente por mês (kg)"),
+            use_container_width=True
+        )
+    with c8_:
+        st.plotly_chart(
+            px.line(g8, x="mes_nome", y="gmd_equivalente_kg_dia",
+                    markers=True, title="GMD equivalente por mês (kg/dia)"),
+            use_container_width=True
+        )
+
+    st.divider()
+
+    # ================== DASHBOARD DE DESTINO ==================
+    st.markdown("### 🏪 Dashboard por Destino")
+    if "destino" in df.columns and not df.empty:
+        dest_qtd = df.groupby("destino", as_index=False)["codigo"].count().rename(columns={"codigo": "animais"}).sort_values("animais", ascending=False)
+        dest_peso = df.groupby("destino", as_index=False)["peso_carcaca_kg"].sum().sort_values("peso_carcaca_kg", ascending=False)
+
+        d1, d2 = st.columns(2)
+        with d1:
+            st.plotly_chart(px.bar(dest_qtd, x="destino", y="animais", title="Quantidade de animais por Destino"),
+                            use_container_width=True)
+        with d2:
+            st.plotly_chart(px.bar(dest_peso, x="destino", y="peso_carcaca_kg", title="Peso de carcaça por Destino (kg)"),
+                            use_container_width=True)
+
+    # ================== DASHBOARD DE SEXO ==================
+    st.markdown("### 🚻 Dashboard por Sexo")
+    if "sexo" in df.columns and not df.empty:
+        sexo_qtd = df.groupby("sexo", as_index=False)["codigo"].count().rename(columns={"codigo": "animais"})
+        sexo_peso = df.groupby("sexo", as_index=False)["peso_carcaca_kg"].sum()
+
+        s1, s2 = st.columns(2)
+        with s1:
+            st.plotly_chart(px.bar(sexo_qtd, x="sexo", y="animais", title="Quantidade de animais por Sexo"),
+                            use_container_width=True)
+        with s2:
+            st.plotly_chart(px.bar(sexo_peso.reset_index(), x="sexo", y="peso_carcaca_kg",
+                                   title="Peso de carcaça por Sexo (kg)"),
+                            use_container_width=True)
 
     st.divider()
     csv_bytes = df_to_csv_bytes(df_registros_filtrados)
