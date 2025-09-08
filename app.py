@@ -79,9 +79,9 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 
 def fmt3(v):
-    """Formata com 3 casas e vírgula como separador decimal: 0,000"""
+    """Formata com 3 casas e ponto: 0.000 (sem separador de milhar)"""
     try:
-        return f"{float(v):,.3f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        return f"{float(v):.3f}"
     except Exception:
         return "–"
 
