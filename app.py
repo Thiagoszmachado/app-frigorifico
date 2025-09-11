@@ -97,12 +97,11 @@ def make_excel_workbook(df_registros: pd.DataFrame,
         return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        # --- AQUI ESTÁ A CORREÇÃO ---
+        # robustez com df vazio
         if df_registros is None or not isinstance(df_registros, pd.DataFrame) or df_registros.empty:
             safe = pd.DataFrame({"(sem dados)": [""]})
         else:
             safe = df_registros.copy()
-        # -----------------------------
 
         # Datas como texto
         for c in ["data_entrada_confinamento", "data_abate", "created_at"]:
@@ -228,7 +227,6 @@ def fetch_abates() -> pd.DataFrame:
     df["@_arrobas"] = df["peso_carcaca_kg"] / 15.0
 
     # ---- CAMPOS EQUIVALENTES (fallback se vierem nulos do banco)
-    # peso_equivalente_carcaca_kg = (peso_carcaca_kg/15)*30 = peso_carcaca_kg * 2
     if "peso_equivalente_carcaca_kg" not in df.columns:
         df["peso_equivalente_carcaca_kg"] = np.nan
     df["peso_equivalente_carcaca_kg"] = df["peso_equivalente_carcaca_kg"].where(
@@ -236,7 +234,6 @@ def fetch_abates() -> pd.DataFrame:
         df["peso_carcaca_kg"] * 2.0
     )
 
-    # gmd_equivalente_kg_dia = (peso_equivalente - peso_entrada) / dias_confinado
     if "gmd_equivalente_kg_dia" not in df.columns:
         df["gmd_equivalente_kg_dia"] = np.nan
     df["gmd_equivalente_kg_dia"] = df["gmd_equivalente_kg_dia"].where(
