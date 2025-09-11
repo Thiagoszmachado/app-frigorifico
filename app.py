@@ -1,6 +1,6 @@
 # app.py
 from __future__ import annotations
-# comentario para atualização
+#comentario para atualização
 
 from datetime import date, datetime
 from io import BytesIO
@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-import bcrypt
 from supabase import Client, create_client
 
 # ---------------------------------------------------
@@ -66,65 +65,6 @@ SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------------------------------------------------
-# AUTH (tabela public.users com username/pass_hash bcrypt)
-# ---------------------------------------------------
-def _get_user_by_username(username: str) -> dict | None:
-    try:
-        r = supabase.table("users").select("*").eq("username", username).limit(1).execute()
-        rows = r.data or []
-        return rows[0] if rows else None
-    except Exception:
-        return None
-
-def login_ui() -> bool:
-    st.sidebar.markdown("### 🔐 Login")
-    with st.sidebar.form("form_login", clear_on_submit=False):
-        u = st.text_input("Usuário", value=st.session_state.get("last_user", ""))
-        p = st.text_input("Senha", type="password")
-        ok = st.form_submit_button("Entrar")
-    if ok:
-        user = _get_user_by_username(u.strip())
-        if not user:
-            st.sidebar.error("Usuário inválido.")
-            return False
-        pass_hash = (user.get("pass_hash") or "").encode()
-        if not pass_hash or not p:
-            st.sidebar.error("Senha inválida.")
-            return False
-        try:
-            if bcrypt.checkpw(p.encode(), pass_hash):
-                st.session_state["auth_user"] = {
-                    "id": user["id"],
-                    "username": user["username"],
-                    "is_admin": bool(user.get("is_admin") or False),
-                }
-                st.session_state["last_user"] = user["username"]
-                st.sidebar.success(f"Bem-vindo, {user['username']}!")
-                return True
-            else:
-                st.sidebar.error("Senha incorreta.")
-                return False
-        except Exception:
-            st.sidebar.error("Falha ao validar senha.")
-            return False
-    return "auth_user" in st.session_state
-
-def logout_button():
-    if st.sidebar.button("Sair"):
-        for k in ["auth_user", "last_user"]:
-            st.session_state.pop(k, None)
-        st.experimental_rerun()
-
-# exige login; se não logado, só mostra tela de login e sai
-if not login_ui():
-    st.stop()
-logout_button()
-
-AUTH_USER = st.session_state.get("auth_user", {})
-AUTH_ID: str | None = AUTH_USER.get("id")
-AUTH_ADMIN: bool = bool(AUTH_USER.get("is_admin"))
-
-# ---------------------------------------------------
 # HELPERS
 # ---------------------------------------------------
 def ordenar_por_mes(df: pd.DataFrame, col: str = "mes_nome") -> pd.DataFrame:
@@ -133,8 +73,10 @@ def ordenar_por_mes(df: pd.DataFrame, col: str = "mes_nome") -> pd.DataFrame:
         df = df.sort_values(col)
     return df
 
+
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
+
 
 def fmt3(v):
     """Formata com 3 casas e ponto: 0.000 (sem separador de milhar)"""
@@ -143,27 +85,40 @@ def fmt3(v):
     except Exception:
         return "–"
 
+
 def make_excel_workbook(df_registros: pd.DataFrame,
                         sheets: dict[str, pd.DataFrame] | None = None) -> BytesIO:
     """Gera Excel com aba Registros + abas extras (pivôs), com ajuste de largura robusto."""
     output = BytesIO()
+
     if not HAS_XLSXWRITER:
         output.write(b"")
         output.seek(0)
         return output
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        # --- AQUI ESTÁ A CORREÇÃO ---
         if df_registros is None or not isinstance(df_registros, pd.DataFrame) or df_registros.empty:
             safe = pd.DataFrame({"(sem dados)": [""]})
         else:
             safe = df_registros.copy()
+        # -----------------------------
+
+        # Datas como texto
         for c in ["data_entrada_confinamento", "data_abate", "created_at"]:
             if c in safe.columns:
                 safe[c] = pd.to_datetime(safe[c], errors="coerce").dt.strftime("%d/%m/%Y")
+
+        # Aba principal
         safe.to_excel(writer, sheet_name="Registros", index=False)
+
+        # Abas extras (pivôs)
         if sheets:
             for name, dfp in sheets.items():
                 if isinstance(dfp, pd.DataFrame) and not dfp.empty:
                     dfp.to_excel(writer, sheet_name=name[:31], index=True)
+
+        # Ajuste seguro de largura
         ws0 = writer.sheets["Registros"]
         for i, col in enumerate(safe.columns):
             try:
@@ -179,8 +134,10 @@ def make_excel_workbook(df_registros: pd.DataFrame,
             except Exception:
                 width = 15
             ws0.set_column(i, i, width)
+
     output.seek(0)
     return output
+
 
 def add_loja_if_new(nome_loja: str):
     nome_loja = (nome_loja or "").strip()
@@ -193,6 +150,7 @@ def add_loja_if_new(nome_loja: str):
     except Exception:
         pass
 
+
 def month_pivot(df: pd.DataFrame, metric: str, agg: str = "mean") -> pd.DataFrame:
     if df.empty or metric not in df.columns:
         return pd.DataFrame()
@@ -202,48 +160,48 @@ def month_pivot(df: pd.DataFrame, metric: str, agg: str = "mean") -> pd.DataFram
     idx = [o for o in ORIGENS if o in pt.index]
     return pt.reindex(index=idx, columns=cols)
 
+
 def log_usage(action: str, rows: int = 0, notes: dict | None = None):
     """Logger opcional em public.usage_events (ignora erros se não existir)."""
     try:
         supabase.table("usage_events").insert({
             "action": action,
             "rows_affected": rows,
-            "notes": notes or {},
-            "owner_id": AUTH_ID,  # registra quem executou
+            "notes": notes or {}
         }).execute()
     except Exception:
         pass
 
+
 # ---------------------------------------------------
 # DADOS (fetch_abates com meses sem locale + novos cálculos)
-# Respeita owner_id: admin vê tudo; usuário vê só dele.
 # ---------------------------------------------------
 @st.cache_data(ttl=20)
-def fetch_abates(owner_id: str | None, is_admin: bool) -> pd.DataFrame:
-    q = supabase.table("abates").select("*").order("data_abate")
-    if not is_admin and owner_id:
-        q = q.eq("owner_id", owner_id)
-    res = q.execute()
+def fetch_abates() -> pd.DataFrame:
+    res = supabase.table("abates").select("*").order("data_abate").execute()
     df = pd.DataFrame(res.data or [])
 
+    # Datas -> date
     for c in ["data_entrada_confinamento", "data_abate", "created_at"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
 
-    for c in ["peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg",
-              "rendimento_carcaca_pct", "peso_equivalente_carcaca_kg",
-              "gmd_equivalente_kg_dia"]:
+    # Numéricos
+    for c in ["peso_entrada_kg", "peso_abate_kg", "peso_carcaca_kg", "rendimento_carcaca_pct",
+              "peso_equivalente_carcaca_kg", "gmd_equivalente_kg_dia"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
     dt_ent = pd.to_datetime(df.get("data_entrada_confinamento"), errors="coerce")
     dt_aba = pd.to_datetime(df.get("data_abate"), errors="coerce")
 
+    # Dias confinado
     df["dias_confinado"] = np.where(
         (dt_ent.notna()) & (dt_aba.notna()),
         (dt_aba - dt_ent).dt.days, np.nan
     )
 
+    # Consistência carcaça e rendimento
     tem_abate = df.get("peso_abate_kg").notna()
 
     mask_calc_pct = tem_abate & df.get("peso_carcaca_kg").notna()
@@ -256,6 +214,7 @@ def fetch_abates(owner_id: str | None, is_admin: bool) -> pd.DataFrame:
         df.loc[mask_calc_peso, "peso_abate_kg"] * df.loc[mask_calc_peso, "rendimento_carcaca_pct"]
     )
 
+    # Ganho e GMD
     df["ganho_peso_kg"] = np.where(
         df.get("peso_abate_kg").notna() & df.get("peso_entrada_kg").notna(),
         df["peso_abate_kg"] - df["peso_entrada_kg"], np.nan
@@ -265,8 +224,11 @@ def fetch_abates(owner_id: str | None, is_admin: bool) -> pd.DataFrame:
         df["ganho_peso_kg"] / df["dias_confinado"], np.nan
     )
 
+    # Arrobas
     df["@_arrobas"] = df["peso_carcaca_kg"] / 15.0
 
+    # ---- CAMPOS EQUIVALENTES (fallback se vierem nulos do banco)
+    # peso_equivalente_carcaca_kg = (peso_carcaca_kg/15)*30 = peso_carcaca_kg * 2
     if "peso_equivalente_carcaca_kg" not in df.columns:
         df["peso_equivalente_carcaca_kg"] = np.nan
     df["peso_equivalente_carcaca_kg"] = df["peso_equivalente_carcaca_kg"].where(
@@ -274,6 +236,7 @@ def fetch_abates(owner_id: str | None, is_admin: bool) -> pd.DataFrame:
         df["peso_carcaca_kg"] * 2.0
     )
 
+    # gmd_equivalente_kg_dia = (peso_equivalente - peso_entrada) / dias_confinado
     if "gmd_equivalente_kg_dia" not in df.columns:
         df["gmd_equivalente_kg_dia"] = np.nan
     df["gmd_equivalente_kg_dia"] = df["gmd_equivalente_kg_dia"].where(
@@ -287,6 +250,7 @@ def fetch_abates(owner_id: str | None, is_admin: bool) -> pd.DataFrame:
         )
     )
 
+    # Tempo (sem locale)
     df["ano"] = dt_aba.dt.year
     df["mes"] = dt_aba.dt.month
     df["mes_nome"] = df["mes"].map(MAPA_MES)
@@ -294,10 +258,12 @@ def fetch_abates(owner_id: str | None, is_admin: bool) -> pd.DataFrame:
 
     return df
 
+
 @st.cache_data(ttl=60)
 def fetch_lojas() -> list[str]:
     res = supabase.table("lojas").select("nome").order("nome").execute()
     return sorted([r["nome"] for r in (res.data or [])])
+
 
 def upsert_abate(payload: dict):
     sel = supabase.table("abates").select("id") \
@@ -310,24 +276,21 @@ def upsert_abate(payload: dict):
         log_usage("insert", rows=1, notes={"codigo": payload["codigo"]})
     fetch_abates.clear()
 
+
 def delete_abate(codigo: str, data_abate: date):
-    q = supabase.table("abates").delete().eq("codigo", codigo).eq("data_abate", str(data_abate))
-    # segurança extra: se não admin, garante owner_id
-    if not AUTH_ADMIN and AUTH_ID:
-        q = q.eq("owner_id", AUTH_ID)
-    q.execute()
+    supabase.table("abates").delete().eq("codigo", codigo).eq("data_abate", str(data_abate)).execute()
     log_usage("delete", rows=1, notes={"codigo": codigo})
     fetch_abates.clear()
 
+
 # ---------------------------------------------------
-# SIDEBAR: FILTROS
+# SIDEBAR: FILTROS (inclui dia do mês)
 # ---------------------------------------------------
 st.sidebar.divider()
-st.sidebar.write(f"👤 Usuário: **{AUTH_USER.get('username','?')}** {'(admin)' if AUTH_ADMIN else ''}")
-
-df_all_cache = fetch_abates(AUTH_ID, AUTH_ADMIN)
-
 st.sidebar.title("Filtro")
+
+df_all_cache = fetch_abates()
+
 anos = sorted(list({int(x) for x in df_all_cache["ano"].dropna().unique()})) or [datetime.now().year]
 ano_sel = st.sidebar.selectbox("Ano do abate", anos, index=len(anos) - 1)
 
@@ -342,7 +305,7 @@ dias_disponiveis = sorted(df_all_cache.loc[df_all_cache["ano"] == ano_sel, "dia_
 dias_sel = st.sidebar.multiselect("Dias do mês", dias_disponiveis, default=dias_disponiveis)
 
 # ---------------------------------------------------
-# MONITOR DE USO
+# MONITOR DE USO (estimativa + opcional usage_events)
 # ---------------------------------------------------
 st.sidebar.divider()
 st.sidebar.subheader("📈 Uso do plano (estimativa)")
@@ -352,7 +315,7 @@ if "logged_open" not in st.session_state:
     st.session_state["logged_open"] = True
 
 total_linhas = len(df_all_cache)
-mb_est = (total_linhas * 0.5) / 1024
+mb_est = (total_linhas * 0.5) / 1024  # ~0,5KB/linha
 st.sidebar.write(f"Registros: **{total_linhas}**")
 st.sidebar.write(f"Espaço estimado: **{mb_est:.2f} MB** / 500 MB")
 st.sidebar.progress(min(1.0, mb_est / 500.0), text="Limite de 500 MB")
@@ -382,19 +345,19 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.subheader("Cadastrar / Editar / Excluir Abate")
 
+    # ---------- Utils para edição ----------
     def _get_record(codigo_: str, data_abate_dt: date) -> dict | None:
         try:
-            q = supabase.table("abates").select("*") \
+            res = supabase.table("abates").select("*") \
                 .eq("codigo", codigo_.strip()) \
-                .eq("data_abate", str(data_abate_dt)).limit(1)
-            if not AUTH_ADMIN and AUTH_ID:
-                q = q.eq("owner_id", AUTH_ID)
-            res = q.execute()
+                .eq("data_abate", str(data_abate_dt)) \
+                .limit(1).execute()
             rows = res.data or []
             return rows[0] if rows else None
         except Exception:
             return None
 
+    # ========== BLOCO: CARREGAR REGISTRO PARA EDIÇÃO ==========
     st.markdown("### 🔎 Carregar registro para edição")
     col_find_a, col_find_b, col_find_c = st.columns([1, 1, 0.5])
     with col_find_a:
@@ -426,6 +389,7 @@ with tab1:
 
     st.divider()
 
+    # ========== FORMULÁRIO: CADASTRAR / EDITAR ==========
     st.markdown("### ✍️ Formulário de cadastro/edição")
 
     _d = st.session_state.get("form_defaults", {})
@@ -449,6 +413,7 @@ with tab1:
         with colC:
             origem = st.selectbox("Origem *", ORIGENS, index=(ORIGENS.index(defv_origem) if defv_origem in ORIGENS else 0))
 
+        # Destinos
         lojas = fetch_lojas()
         lojas_opt = lojas + ["+ Cadastrar nova loja…"]
 
@@ -488,6 +453,7 @@ with tab1:
                 format="DD/MM/YYYY"
             )
 
+        # Pesos
         colG, colH, colI = st.columns([1, 1, 1])
         with colG:
             peso_entrada = st.number_input("Peso de Entrada (kg)", value=float(defv_peso_ent), min_value=0.0, step=1.0)
@@ -496,10 +462,12 @@ with tab1:
         with colI:
             peso_carcaca = st.number_input("Peso de Carcaça (kg) (preferível)", value=float(defv_peso_car), min_value=0.0, step=1.0)
 
+        # Calculados em tela (visuais)
         rendimento_view = ""
         if peso_abate and peso_carcaca:
             rendimento_view = f"{(peso_carcaca / peso_abate) * 100:.2f}%"
 
+        # Dias confinado (para GMD equivalente)
         dias_confinado_calc = None
         if data_entrada and data_abate:
             try:
@@ -509,10 +477,12 @@ with tab1:
             except Exception:
                 dias_confinado_calc = None
 
+        # Peso equivalente e GMD equivalente (em tela)
         peso_equivalente_view = None
         gmd_equivalente_view = None
         if peso_carcaca:
-            peso_equivalente_view = float(peso_carcaca) * 2.0
+            peso_equivalente_view = float(peso_carcaca) * 2.0  # (carcaça/15)*30
+
         if peso_equivalente_view is not None and peso_entrada and dias_confinado_calc and dias_confinado_calc > 0:
             gmd_equivalente_view = (peso_equivalente_view - float(peso_entrada)) / float(dias_confinado_calc)
 
@@ -532,19 +502,23 @@ with tab1:
             if not (destino1 or "").strip():
                 st.error("Destino 1 é obrigatório.")
                 st.stop()
-            if not AUTH_ID:
-                st.error("Sessão inválida. Faça login novamente.")
-                st.stop()
 
+            # Garante cadastro das lojas novas
             if destino1 and destino1 not in fetch_lojas():
                 add_loja_if_new(destino1)
             if destino2 and destino2 not in fetch_lojas():
                 add_loja_if_new(destino2)
 
+            # Campos calculados para persistir
             rendimento_pct_store = (float(peso_carcaca) / float(peso_abate)) if (peso_abate and peso_carcaca) else None
             peso_equivalente_store = (float(peso_carcaca) * 2.0) if peso_carcaca else None
             gmd_equivalente_store = None
-            if (peso_equivalente_store is not None and peso_entrada and data_entrada and data_abate):
+            if (
+                peso_equivalente_store is not None
+                and peso_entrada
+                and data_entrada
+                and data_abate
+            ):
                 try:
                     _dias = (pd.to_datetime(str(data_abate)) - pd.to_datetime(str(data_entrada))).days
                     if _dias and _dias > 0:
@@ -564,9 +538,9 @@ with tab1:
                 "peso_abate_kg": float(peso_abate) if peso_abate else None,
                 "peso_carcaca_kg": float(peso_carcaca) if peso_carcaca else None,
                 "rendimento_carcaca_pct": rendimento_pct_store,
+                # Novos campos persistidos
                 "peso_equivalente_carcaca_kg": peso_equivalente_store,
                 "gmd_equivalente_kg_dia": gmd_equivalente_store,
-                "owner_id": AUTH_ID,  # <- AMARRA O DONO
             }
 
             upsert_abate(payload)
@@ -575,6 +549,7 @@ with tab1:
 
     st.divider()
 
+    # ========== LISTA / FILTROS RÁPIDOS ==========
     st.subheader("Registros (filtro rápido)")
     colf1, colf2, colf3 = st.columns(3)
     with colf1:
@@ -584,7 +559,7 @@ with tab1:
     with colf3:
         filtro_origem = st.multiselect("Filtrar por Origem", ORIGENS, default=ORIGENS)
 
-    df_tab1 = fetch_abates(AUTH_ID, AUTH_ADMIN).copy()
+    df_tab1 = fetch_abates().copy()
     if filtro_codigo:
         df_tab1 = df_tab1[df_tab1["codigo"].str.contains(filtro_codigo, case=False, na=False)]
     if filtro_destino:
@@ -595,6 +570,7 @@ with tab1:
     if filtro_origem:
         df_tab1 = df_tab1[df_tab1["origem"].isin(filtro_origem)]
 
+    # Formatação visual 0,000 nos dois campos
     df_show = df_tab1.copy()
     for col in ["peso_equivalente_carcaca_kg", "gmd_equivalente_kg_dia"]:
         if col in df_show.columns:
@@ -611,6 +587,7 @@ with tab1:
         use_container_width=True, hide_index=True
     )
 
+    # ========== EXCLUSÃO ==========
     st.caption("Para excluir, informe Código + Data do Abate:")
     colx, coly, colz = st.columns(3)
     with colx:
@@ -630,7 +607,7 @@ with tab1:
 # ===================================================
 with tab2:
     st.subheader("Visão geral (com filtros)")
-    df_all = fetch_abates(AUTH_ID, AUTH_ADMIN)
+    df_all = fetch_abates()
 
     mask_global = (
         (df_all["ano"] == ano_sel) &
@@ -642,6 +619,7 @@ with tab2:
     df = df_all.loc[mask_global].copy()
     df_registros_filtrados = df.copy()
 
+    # ================== KPIs ==================
     k1, k2, k3, k4, k5, k6 = st.columns(6)
     with k1:
         st.metric("Animais", len(df))
@@ -658,6 +636,7 @@ with tab2:
 
     st.divider()
 
+    # ================== GRÁFICOS GERAIS ==================
     g1 = df.groupby("mes_nome", as_index=False)["peso_carcaca_kg"].sum().pipe(ordenar_por_mes)
     g2 = df.groupby("origem", as_index=False)["peso_carcaca_kg"].sum().sort_values("peso_carcaca_kg", ascending=False)
     g3 = df.groupby("mes_nome", as_index=False)["rendimento_carcaca_pct"].mean().pipe(ordenar_por_mes)
@@ -712,6 +691,37 @@ with tab2:
         st.plotly_chart(fig_g8, use_container_width=True)
 
     st.divider()
+
+    # ================== DASHBOARD DE DESTINO ==================
+    st.markdown("### 🏪 Dashboard por Destino")
+    if "destino" in df.columns and not df.empty:
+        dest_qtd = df.groupby("destino", as_index=False)["codigo"].count().rename(columns={"codigo": "animais"}).sort_values("animais", ascending=False)
+        dest_peso = df.groupby("destino", as_index=False)["peso_carcaca_kg"].sum().sort_values("peso_carcaca_kg", ascending=False)
+
+        d1, d2 = st.columns(2)
+        with d1:
+            st.plotly_chart(px.bar(dest_qtd, x="destino", y="animais", title="Quantidade de animais por Destino"),
+                            use_container_width=True)
+        with d2:
+            st.plotly_chart(px.bar(dest_peso, x="destino", y="peso_carcaca_kg", title="Peso de carcaça por Destino (kg)"),
+                            use_container_width=True)
+
+    # ================== DASHBOARD DE SEXO ==================
+    st.markdown("### 🚻 Dashboard por Sexo")
+    if "sexo" in df.columns and not df.empty:
+        sexo_qtd = df.groupby("sexo", as_index=False)["codigo"].count().rename(columns={"codigo": "animais"})
+        sexo_peso = df.groupby("sexo", as_index=False)["peso_carcaca_kg"].sum()
+
+        s1, s2 = st.columns(2)
+        with s1:
+            st.plotly_chart(px.bar(sexo_qtd, x="sexo", y="animais", title="Quantidade de animais por Sexo"),
+                            use_container_width=True)
+        with s2:
+            st.plotly_chart(px.bar(sexo_peso.reset_index(), x="sexo", y="peso_carcaca_kg",
+                                   title="Peso de carcaça por Sexo (kg)"),
+                            use_container_width=True)
+
+    st.divider()
     csv_bytes = df_to_csv_bytes(df_registros_filtrados)
     st.download_button(
         "⬇ Baixar CSV (filtrado)", data=csv_bytes,
@@ -725,7 +735,7 @@ with tab2:
 # ===================================================
 with tab3:
     st.subheader("Pivôs e Indicadores")
-    df_all = fetch_abates(AUTH_ID, AUTH_ADMIN)
+    df_all = fetch_abates()
 
     mask_global = (
         (df_all["ano"] == ano_sel) &
@@ -774,7 +784,7 @@ with tab3:
 # ===================================================
 with tab4:
     st.subheader("Insights & Resumos")
-    df_all = fetch_abates(AUTH_ID, AUTH_ADMIN)
+    df_all = fetch_abates()
 
     mask_global = (
         (df_all["ano"] == ano_sel) &
@@ -791,6 +801,7 @@ with tab4:
 
     dti = pd.to_datetime(dfi["data_abate"], errors="coerce")
 
+    # Por dia
     grp_day = dfi.groupby(dti.dt.date).agg(
         animais=("codigo", "count"),
         carcaca_kg=("peso_carcaca_kg", "sum"),
@@ -798,6 +809,7 @@ with tab4:
         rendimento_pct=("rendimento_carcaca_pct", lambda s: (s.mean() * 100) if len(s) > 0 else np.nan)
     ).reset_index(names="data").sort_values("data")
 
+    # Por semana (segunda como início)
     semana = dti.dt.to_period("W-MON").astype(str)
     grp_week = dfi.groupby(semana).agg(
         animais=("codigo", "count"),
@@ -806,6 +818,7 @@ with tab4:
         rendimento_pct=("rendimento_carcaca_pct", lambda s: (s.mean() * 100) if len(s) > 0 else np.nan)
     ).reset_index(names="semana")
 
+    # Por mês
     grp_month = dfi.groupby("mes_nome").agg(
         animais=("codigo", "count"),
         carcaca_kg=("peso_carcaca_kg", "sum"),
